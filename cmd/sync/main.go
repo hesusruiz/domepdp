@@ -4,13 +4,19 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
+	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/hesusruiz/domeproxy/tmfsync"
+	"gitlab.com/greyxor/slogor"
 )
 
 func main() {
+
+	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(slog.LevelDebug), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
+
 	var err error
 
 	var refreshTime = flag.Int("refresh", 3600, "refresh time in seconds, to update all objects older than this time")
@@ -38,7 +44,10 @@ func main() {
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	tmf, err := tmfsync.New(server)
+
+	tmfConfig := tmfsync.DefaultConfig(server)
+
+	tmf, err := tmfsync.New(tmfConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

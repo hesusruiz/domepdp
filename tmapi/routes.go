@@ -8,7 +8,6 @@ import (
 
 	"github.com/goccy/go-json"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/hesusruiz/domeproxy/pdp"
 	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
@@ -31,13 +30,13 @@ func tokenFromHeader(r *http.Request) string {
 }
 
 func addHttpRoutes(
+	environment tmfsync.Environment,
 	mux *http.ServeMux,
-	config *Config,
 	tmf *tmfsync.TMFdb,
 ) {
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	ruleEngine, err := pdp.NewPDP("auth_policies.star")
+	ruleEngine, err := pdp.NewPDP(environment, "auth_policies.star")
 	if err != nil {
 		panic(err)
 	}
@@ -95,68 +94,24 @@ func handleGETlist(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func
 	}
 }
 
-// getClaimsFromRequest verifies the Access Token received with the request, and extracts the claims in its payload.
-// The most important claim in the payload is the LEARCredential that was used for authentication.
-func getClaimsFromRequest(r *http.Request) (claims string, found bool, err error) {
-	var token *jwt.Token
-
-	publicKeyFunc := func(*jwt.Token) (interface{}, error) {
-
-		// Get the Verifier keys
-		domeJWKS, err := pdp.DOME_JWKS()
-		if err != nil {
-			return nil, err
-		}
-
-		domeJWK := domeJWKS.Keys[0]
-
-		return domeJWK.Key, nil
-
-	}
-
-	claims = "{}"
-
-	tokString := tokenFromHeader(r)
-	if tokString != "" {
-
-		token, err = jwt.NewParser().ParseWithClaims(tokString, jwt.MapClaims{}, publicKeyFunc)
-
-		// token, _, err = jwt.NewParser().ParseUnverified(tokString, jwt.MapClaims{})
-		if err != nil {
-			return "{}", false, err
-		}
-		cl, err := json.Marshal(token.Claims)
-		if err != nil {
-			return "{}", false, err
-		}
-		claims = string(cl)
-	}
-
-	return claims, true, nil
-
-}
-
 // handleGET retrieves a single TMF object, subject to authorization policy rules
 func handleGET(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		// Retrieve the claims in the Access Token from the request, if they exists.
-		// We do not enforce here its existence, and delegate enforcement (or not) to the policies in the rule engine
-		claimsString, found, err := getClaimsFromRequest(r)
-		if err != nil {
-			slog.Error("error parsing token", slogor.Err(err))
-			return
-		}
+		// Retrieve the Access Token from the request, if it exists.
+		// We do not enforce here its existence or validity, and delegate enforcement (or not) to the policies in the rule engine
+		tokString := tokenFromHeader(r)
 
 		// Just some logs
-		if !found {
+		if tokString == "" {
 			slog.Warn("no token found")
 		} else {
-			slog.Debug("Access Token found", "claims", claimsString)
+			slog.Debug("Access Token found")
 		}
 
-		// Retrieve the object, either from our local database or remotely it it does not yet exist
-		tmfObject, err := retrieveLocalObject(tmf, tmfType, r)
+		// Retrieve the object, either from our local database or remotely if it does not yet exist.
+		// We need this so the rule engine can evaluate the policies using the data from the object.
+		tmfObject, err := retrieveObject(tmf, tmfType, r)
 		if err != nil {
 			sendError(w, "error retrieving", err.Error())
 			slog.Error("retrieving", slogor.Err(err))
@@ -164,12 +119,12 @@ func handleGET(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w h
 		}
 
 		// Ask the rules engine for a decision on this request
-		decision, err := ruleEngine.TakeAuthnDecision(pdp.Authenticate, r, claimsString, tmfObject)
+		decision, err := ruleEngine.TakeAuthnDecision(pdp.Authorize, r, tokString, tmfObject)
 
 		// An error is considered a rejection
 		if err != nil {
 			sendError(w, "error taking decision", err.Error())
-			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
+			slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
 			return
 		}
 
@@ -201,7 +156,7 @@ func sendError(w http.ResponseWriter, code string, reason string) {
 
 }
 
-func retrieveLocalObject(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) (*tmfsync.TMFObject, error) {
+func retrieveObject(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) (*tmfsync.TMFObject, error) {
 
 	id := r.PathValue("id")
 

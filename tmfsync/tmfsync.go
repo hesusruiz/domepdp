@@ -103,17 +103,6 @@ func (po *TMFObject) Hash() []byte {
 	return hasher.Sum(nil)
 }
 
-const DEV2_DOMEServer = "https://dome-marketplace-dev2.org"
-const PRO_DOMEServer = "https://dome-marketplace.eu"
-
-const DEV2_dbname = "./tmf-dev2.db"
-const PRO_dbname = "./tmf.db"
-
-type Environment int
-
-const DOME_PRO Environment = 0
-const DOME_DEV2 Environment = 1
-
 type AccessType bool
 
 const OnlyLocal AccessType = true
@@ -138,31 +127,17 @@ type TMFdb struct {
 	RefreshCounter int
 }
 
-func New(where Environment) (*TMFdb, error) {
+func New(config *Config) (*TMFdb, error) {
 	var err error
 
-	// Determine which server should be used
-	var dbname string
-	var domeServer string
-
-	if where == DOME_DEV2 {
-		domeServer = DEV2_DOMEServer
-		dbname = DEV2_dbname
-	} else if where == DOME_PRO {
-		domeServer = PRO_DOMEServer
-		dbname = PRO_dbname
-	} else {
-		return nil, fmt.Errorf("unknown DOME server: %s", domeServer)
-	}
-
 	tmf := &TMFdb{
-		domeServer:   domeServer,
+		domeServer:   config.domeServer,
 		Maxfreshness: 60 * 60, // 1 hour
 	}
 
 	// Initialize the global pool of database connections
 	if tmf.dbpool == nil {
-		tmf.dbpool, err = sqlitex.NewPool(dbname, sqlitex.PoolOptions{
+		tmf.dbpool, err = sqlitex.NewPool(config.dbname, sqlitex.PoolOptions{
 			PoolSize: 10,
 		})
 		if err != nil {
@@ -338,7 +313,14 @@ func (tmf *TMFdb) CloneRemoteCatalogues() ([]*TMFObject, error) {
 		}
 
 		// There must be a relatedParty object
-		relatedPartyList := po.ContentMap["relatedParty"].([]any)
+		relatedPartyList, ok := po.ContentMap["relatedParty"].([]any)
+		if !ok {
+			slog.Error("invalid relatedParty object")
+			out, _ := json.MarshalIndent(oMap, "", "   ")
+			fmt.Println(string(out))
+			continue
+		}
+
 		if relatedPartyList == nil {
 			slog.Error("relatedParty is nil")
 			return nil, fmt.Errorf("relatedParty is nil")

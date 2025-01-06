@@ -26,7 +26,7 @@ allowed_countries = ("ES", "FR", "IT", "DE", "PT", "UK", "IE", "NL", "BE", "LU",
 
 forbidden_countries = ()
 
-def authenticate(request, claims, tmf):
+def authorize(request, claims, tmf):
     """authenticate determines if a user can be authenticated or not.
 
     Args:
@@ -38,8 +38,12 @@ def authenticate(request, claims, tmf):
     """
     print("Inside authenticate")
 
-    print("type:", tmf.type)
-    print("owner:", tmf.organizationIdentifier)
+    print("type:", tmf["type"])
+    print("owner:", tmf["organizationIdentifier"])
+    print("user:", request["user"])
+
+    if not request["user"]["isOwner"]:
+        return False
 
     method = request["method"]
     if method == "GET":
@@ -56,16 +60,7 @@ def authenticate(request, claims, tmf):
 
     print(mandator_country, "is Allowed country")
     return True
-    
 
-# authorize is called for every access to a given protected resource
-def authorize(request, claims):
-
-    print(request["tmf_type"])
-    print(request["id"])
-
-    # In this example, we authorize all calls
-    return True
 
 
 ###############################################################################

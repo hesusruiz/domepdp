@@ -21,56 +21,53 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/cmd/mitm"
 	"github.com/hesusruiz/domeproxy/internal/run"
+	"github.com/hesusruiz/domeproxy/mitm"
 	"github.com/hesusruiz/domeproxy/tmapi"
 	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 )
 
-// These are the hosts that we will really intercept and inspect request/replies. Any otehr host will be just forwarded transparently.
-var targets = []string{
-	"dome-marketplace.eu",
-	"dome-marketplace-prd.eu",
-	"dome-marketplace-prd.org",
-	"dome-marketplace.org",
-}
-
 func main() {
 
 	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(slog.LevelDebug), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
 
-	var _ = flag.String("addr", ":9991", "proxy address")
-	caCertFile := flag.String("cacertfile", "", "certificate .pem file for trusted CA")
-	caKeyFile := flag.String("cakeyfile", "", "key .pem file for trusted CA")
+	pdpAddress := flag.String("pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
+	proxyAddress := flag.String("proxy", ":8888", "address of the PROXY server intercepting requests to/from the Marketplace")
+	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA")
+	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA")
+	prod := flag.Bool("pro", false, "use the PRODUCTION environment")
 	flag.Parse()
 
-	if *caCertFile == "" {
-		*caCertFile = "rootCA.pem"
-	}
-	if *caKeyFile == "" {
-		*caKeyFile = "rootCA-key.pem"
+	var environment = tmfsync.DOME_DEV2
+	if *prod {
+		environment = tmfsync.DOME_PRO
+		fmt.Println("Using the PRODUCTION environment")
+	} else {
+		fmt.Println("Using the DEV2 environment")
 	}
 
+	// Group collects actors (functions) and runs them concurrently. When one actor (function) returns, all actors are interrupted.
 	var gr run.Group
 
-	tmf, err := tmfsync.New(tmfsync.DOME_PRO)
+	// Configure the PDP server to receive/authorize intercepted requests
+	tmfConfig, execute, interrupt, err := tmapi.HttpServerHandler(environment, *pdpAddress)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer tmf.Close()
 
-	// Start a normal http server to receive intercepted requests
-	httpConfig := &tmapi.Config{Listen: ":9991"}
-	gr.Add(tmapi.HttpServerHandler(context.Background(), httpConfig, tmf, os.Stdout, os.Args))
+	// Add to the monitoring group
+	gr.Add(execute, interrupt)
 
 	// Start a MITM server to intercept the requests to the TMF APIs
 	mitmConfig := &mitm.Config{
-		Listen:     ":8888",
-		CaCertFile: *caCertFile,
-		CaKeyFile:  *caKeyFile,
+		Listen:      *proxyAddress,
+		CaCertFile:  *caCertFile,
+		CaKeyFile:   *caKeyFile,
+		HostTargets: tmfConfig.HostTargets,
 	}
-	gr.Add(mitm.MITMServerHandler(context.Background(), mitmConfig, tmf, os.Stdout, os.Args))
+	pdpServer := "http://localhost" + *pdpAddress
+	gr.Add(mitm.MITMServerHandler(mitmConfig, pdpServer))
 
 	// The management of the interrupt signal (ctrl-c)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -81,6 +78,6 @@ func main() {
 		stop()
 	})
 
-	// Wait for interrupt signal to gracefully shut down the server.
+	// Start all actors and wait for interrupt signal to gracefully shut down the server.
 	log.Fatal(gr.Run())
 }

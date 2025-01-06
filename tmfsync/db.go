@@ -209,15 +209,16 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 		return nil, false, err
 	}
 
-	updated := stmt.GetInt64("updated")
+	// Complete the object with the relevant fields which are in our db but not in the DOME repo
+	oMap["updated"] = stmt.GetInt64("updated")
+	oMap["organizationIdentifier"] = stmt.GetText("organizationIdentifier")
+	oMap["organization"] = stmt.GetText("organization")
 
 	po, err = NewTMFObject(oMap, content)
 	if err != nil {
 		log.Println(err)
 		return nil, false, err
 	}
-
-	po.Updated = updated
 
 	return po, true, nil
 
@@ -331,6 +332,11 @@ func (tmf *TMFdb) RetrieveLocalListTMFObject(dbconn *sqlite.Conn, tmfType string
 				log.Println(err)
 				return err
 			}
+
+			// Complete the object with the relevant fields which are in our db but not in the DOME repo
+			oMap["updated"] = stmt.GetInt64("updated")
+			oMap["organizationIdentifier"] = stmt.GetText("organizationIdentifier")
+			oMap["organization"] = stmt.GetText("organization")
 
 			po, err := NewTMFObject(oMap, content)
 			if err != nil {

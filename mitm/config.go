@@ -13,6 +13,8 @@ type Config struct {
 
 	CaCertFile string
 	CaKeyFile  string
+
+	HostTargets []string
 }
 
 func LoadConfig() *Config {

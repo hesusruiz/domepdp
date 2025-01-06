@@ -1,8 +1,15 @@
 package pdp
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+
 	"github.com/go-jose/go-jose/v4"
 	"github.com/goccy/go-json"
+	"github.com/hesusruiz/domeproxy/tmfsync"
+	"gitlab.com/greyxor/slogor"
 )
 
 var domeVerifierStaticConf = `{
@@ -99,7 +106,7 @@ type OpenIDConfig struct {
 	ScopesSupported                           []string `json:"scopes_supported,omitempty"`
 }
 
-func NewOpenIDConfig(serialized []byte) (*OpenIDConfig, error) {
+func NewOpenIDConfigFromBytes(serialized []byte) (*OpenIDConfig, error) {
 	oid := &OpenIDConfig{}
 	err := json.Unmarshal(serialized, oid)
 	if err != nil {
@@ -109,15 +116,15 @@ func NewOpenIDConfig(serialized []byte) (*OpenIDConfig, error) {
 	return oid, nil
 }
 
-func MustNewOpenIDConfig(serialized []byte) *OpenIDConfig {
-	oid, err := NewOpenIDConfig(serialized)
+func MustNewOpenIDConfigFromBytes(serialized []byte) *OpenIDConfig {
+	oid, err := NewOpenIDConfigFromBytes(serialized)
 	if err != nil {
 		panic(err)
 	}
 	return oid
 }
 
-var DOMEVerifierConfig = MustNewOpenIDConfig([]byte(domeVerifierStaticConf))
+var DOMEVerifierConfig = MustNewOpenIDConfigFromBytes([]byte(domeVerifierStaticConf))
 
 func DOME_JWKS() (jose.JSONWebKeySet, error) {
 	var jwks = jose.JSONWebKeySet{}
@@ -126,4 +133,110 @@ func DOME_JWKS() (jose.JSONWebKeySet, error) {
 		return jwks, err
 	}
 	return jwks, nil
+}
+
+const DOME_DEV2_WellKnown = "https://verifier.dome-marketplace-dev2.org/.well-known/openid-configuration"
+
+func NewOpenIDConfig(environment tmfsync.Environment) (*OpenIDConfig, error) {
+	oid := &OpenIDConfig{}
+
+	verifierWellKnownURL := DOME_DEV2_WellKnown
+
+	if environment == tmfsync.DOME_PRO {
+		verifierWellKnownURL = "https://verifier.dome-marketplace-dev2.prd/.well-known/openid-configuration"
+	}
+
+	res, err := http.Get(verifierWellKnownURL)
+	if err != nil {
+		slog.Error(err.Error())
+		return nil, err
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode > 299 {
+		slog.Error("Response failed", "status", res.StatusCode, "body", body)
+		return nil, err
+	}
+	if err != nil {
+		slog.Error("reading response body", slogor.Err(err))
+		return nil, err
+	}
+
+	err = json.Unmarshal(body, oid)
+	if err != nil {
+		slog.Error("unmarshalling", slogor.Err(err))
+		return nil, err
+	}
+
+	if oid.JwksUri == "" {
+		return nil, fmt.Errorf("no JwksUri")
+	}
+
+	var jwks = &jose.JSONWebKeySet{}
+
+	res, err = http.Get(oid.JwksUri)
+	if err != nil {
+		slog.Error(err.Error())
+		return nil, err
+	}
+	body, err = io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode > 299 {
+		err := fmt.Errorf("response failed with status: %d", res.StatusCode)
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(body, jwks)
+	if err != nil {
+		slog.Error("unmarshalling JWKS", slogor.Err(err))
+		return nil, err
+	}
+
+	if len(jwks.Keys) == 0 {
+		err := fmt.Errorf("no JWK keys returned")
+		return nil, err
+	}
+
+	return oid, nil
+}
+
+func (oid *OpenIDConfig) VerificationJWK() (jose.JSONWebKey, error) {
+	var jwks = &jose.JSONWebKeySet{}
+	var jwk = jose.JSONWebKey{}
+
+	if oid.JwksUri == "" {
+		return jwk, fmt.Errorf("no JwksUri")
+	}
+
+	res, err := http.Get(oid.JwksUri)
+	if err != nil {
+		slog.Error(err.Error())
+		return jwk, err
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode > 299 {
+		err := fmt.Errorf("response failed with status: %d", res.StatusCode)
+		return jwk, err
+	}
+	if err != nil {
+		return jwk, err
+	}
+
+	err = json.Unmarshal(body, jwks)
+	if err != nil {
+		slog.Error("unmarshalling JWKS", slogor.Err(err))
+		return jwk, err
+	}
+
+	if len(jwks.Keys) == 0 {
+		err := fmt.Errorf("no JWK keys returned")
+		return jwk, err
+	}
+
+	return jwks.Keys[0], nil
+
 }

@@ -36,44 +36,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	"github.com/smarty/cproxy/v2"
 	"gitlab.com/greyxor/slogor"
 )
 
-// These are the hosts that we will really intercept and inspect request/replies. Any other host will be just forwarded transparently.
-var hostTargets = []string{
-	"dome-marketplace.eu",
-	"dome-marketplace-prd.eu",
-	"dome-marketplace-prd.org",
-	"dome-marketplace.org",
-}
-
 func MITMServerHandler(
-	ctx context.Context,
 	config *Config,
-	tmf *tmfsync.TMFdb,
-	w io.Writer,
-	args []string,
+	pdpServer string,
 ) (execute func() error, interrupt func(error)) {
-
-	tmf, err := tmfsync.New(tmfsync.DOME_PRO)
-	if err != nil {
-		slog.Error("creating TMF db", slogor.Err(err))
-		os.Exit(1)
-	}
-	defer tmf.Close()
-
-	// Start a normal http server to receive intercepted requests
-	if config == nil {
-		slog.Error("missing Config file", slogor.Err(err))
-		os.Exit(1)
-	}
 
 	// This is the man-in-the-middle proxy that will intercept the requests to the TMF APIs, so they can be served locally from the
 	// local database, or updated if the local copy is not fresh anymore.
 	// In addition, we can test the authorization mechanism for each API
-	mitmProxy := createMitmProxy(config.CaCertFile, config.CaKeyFile)
+	mitmProxy := createMitmProxy(config.CaCertFile, config.CaKeyFile, pdpServer)
 
 	// This proxy just connects the client with the server and does not look inside the requests/responses, because they are encrypted.
 	// We need this for all the requests that we are not interested in, and because we can not (do not want to) tell the client browser which are the requests
@@ -88,6 +63,7 @@ func MITMServerHandler(
 	rh := &roothandler{
 		mitmProxy:        mitmProxy,
 		transparentProxy: transparentProxy,
+		hostTargets:      config.HostTargets,
 	}
 
 	// The main server will accept requests without TLS, using port 80
@@ -97,7 +73,6 @@ func MITMServerHandler(
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
-		// TLSConfig:      m.TLSConfig(),
 	}
 
 	return func() error {
@@ -118,6 +93,7 @@ func MITMServerHandler(
 type roothandler struct {
 	mitmProxy        *mitmProxy
 	transparentProxy http.Handler
+	hostTargets      []string
 }
 
 func (h *roothandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +154,7 @@ func (h *roothandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// If the client wants to connect to one of the hosts that we are interested in, then we use the MITM proxy to intercept traffic.
 		// Otherwise, we will just use the transparent proxy because we are not interested in the data exchanged.
-		if slices.Contains(hostTargets, host) {
+		if slices.Contains(h.hostTargets, host) {
 			h.mitmProxy.ServeHTTP(w, r)
 		} else {
 			h.transparentProxy.ServeHTTP(w, r)
@@ -196,14 +172,15 @@ func (h *roothandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // mitmProxy is a type implementing http.Handler that serves as a MITM proxy
 // for CONNECT tunnels. Create new instances of mitmProxy using createMitmProxy.
 type mitmProxy struct {
-	caCert *x509.Certificate
-	caKey  any
+	caCert    *x509.Certificate
+	caKey     any
+	pdpServer string
 }
 
 // createMitmProxy creates a new MITM proxy. It should be passed the filenames
 // for the certificate and private key of a certificate authority trusted by the
 // client's machine.
-func createMitmProxy(caCertFile, caKeyFile string) *mitmProxy {
+func createMitmProxy(caCertFile, caKeyFile string, pdpServer string) *mitmProxy {
 	caCert, caKey, err := loadX509KeyPair(caCertFile, caKeyFile)
 	if err != nil {
 		slog.Error("Error loading CA certificate/key", slogor.Err(err))
@@ -212,8 +189,9 @@ func createMitmProxy(caCertFile, caKeyFile string) *mitmProxy {
 	slog.Info("loaded CA certificate and key;", "IsCA", caCert.IsCA)
 
 	return &mitmProxy{
-		caCert: caCert,
-		caKey:  caKey,
+		caCert:    caCert,
+		caKey:     caKey,
+		pdpServer: pdpServer,
 	}
 }
 
@@ -336,7 +314,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 			// Take the original request and change its destination to be forwarded
 			// to the target server.
 
-			targetUrl, err := url.Parse("http://localhost:9991")
+			targetUrl, err := url.Parse(p.pdpServer)
 			if err != nil {
 				slog.Error("## MITM LOCAL", slogor.Err(err), "URL", r.URL)
 				tlsConn.Close()
@@ -355,8 +333,6 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 				tlsConn.Close()
 				return
 			}
-
-			// TODO: check that the response is correct and has content
 
 			slog.Debug("## MITM LOCAL", "URL", r.URL, "status", resp.Status)
 			sendReply(tlsConn, resp)
