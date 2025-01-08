@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/hesusruiz/domeproxy/constants"
 	"gopkg.in/yaml.v3"
 )
 
@@ -13,13 +14,8 @@ const PRO_DOMEServer = "https://dome-marketplace.eu"
 const DEV2_dbname = "./tmf-dev2.db"
 const PRO_dbname = "./tmf.db"
 
-type Environment int
-
-const DOME_PRO Environment = 0
-const DOME_DEV2 Environment = 1
-
 type Config struct {
-	environment Environment
+	environment constants.Environment
 	CaCertFile  string
 	CaKeyFile   string
 
@@ -53,16 +49,16 @@ var DEV2HostTargets = []string{
 	"dome-marketplace-dev2.org",
 }
 
-func DefaultConfig(where Environment) *Config {
+func DefaultConfig(where constants.Environment) *Config {
 	conf := &Config{environment: where}
 
-	if where == DOME_DEV2 {
+	if where == constants.DOME_DEV2 {
 
 		conf.HostTargets = DEV2HostTargets
 		conf.domeServer = DEV2_DOMEServer
 		conf.dbname = DEV2_dbname
 
-	} else if where == DOME_PRO {
+	} else if where == constants.DOME_PRO {
 
 		conf.HostTargets = PROHostTargets
 		conf.domeServer = PRO_DOMEServer

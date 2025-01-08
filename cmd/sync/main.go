@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
+	"github.com/hesusruiz/domeproxy/constants"
 	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 )
@@ -26,16 +27,16 @@ func main() {
 
 	flag.Parse()
 
-	var server tmfsync.Environment
+	var server constants.Environment
 	if *production {
-		server = tmfsync.DOME_PRO
+		server = constants.DOME_PRO
 		if *delete {
 			os.Remove(tmfsync.PRO_dbname)
 			os.Remove("./tmf.db-shm")
 			os.Remove("./tmf.db-wal")
 		}
 	} else {
-		server = tmfsync.DOME_DEV2
+		server = constants.DOME_DEV2
 		if *delete {
 			os.Remove(tmfsync.DEV2_dbname)
 			os.Remove("./tmf-dev2.db-shm")

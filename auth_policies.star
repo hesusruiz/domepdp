@@ -36,14 +36,14 @@ def authorize(request, claims, tmf):
     Returns:
         True or False, for allowing authentication or denying it, respectively.
     """
-    print("Inside authenticate")
+    print("Inside authorize")
 
     print("type:", tmf["type"])
     print("owner:", tmf["organizationIdentifier"])
     print("user:", request["user"])
 
-    if not request["user"]["isOwner"]:
-        return False
+#    if not request["user"]["isOwner"]:
+#        return False
 
     method = request["method"]
     if method == "GET":

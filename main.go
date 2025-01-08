@@ -17,31 +17,63 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
 
+	"github.com/hesusruiz/domeproxy/constants"
 	"github.com/hesusruiz/domeproxy/internal/run"
 	"github.com/hesusruiz/domeproxy/mitm"
+
 	"github.com/hesusruiz/domeproxy/tmapi"
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 )
 
 func main() {
-
-	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(slog.LevelDebug), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
 
 	pdpAddress := flag.String("pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
 	proxyAddress := flag.String("proxy", ":8888", "address of the PROXY server intercepting requests to/from the Marketplace")
 	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA")
 	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA")
 	prod := flag.Bool("pro", false, "use the PRODUCTION environment")
+	debug := flag.Bool("debug", false, "run in debug mode with more logs enabled")
+
 	flag.Parse()
 
-	var environment = tmfsync.DOME_DEV2
+	logLevel := new(slog.LevelVar)
+
+	slogor.SetLevel(logLevel)
+
+	if *debug {
+		logLevel.Set(slog.LevelDebug)
+	}
+
+	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(logLevel), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
+
+	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelDebug)
+		w.WriteHeader(http.StatusOK)
+	})
+	http.HandleFunc("/debug/logsoff", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelInfo)
+		w.WriteHeader(http.StatusOK)
+	})
+	go func() {
+		ln, err := net.Listen("tcp", "localhost:")
+		if err != nil {
+			slog.Error("failed to start debug server", "err", err)
+		} else {
+			slog.Info("debug server listening", "addr", ln.Addr())
+			err := http.Serve(ln, nil)
+			slog.Error("debug server exited", "err", err)
+		}
+	}()
+
+	var environment = constants.DOME_DEV2
 	if *prod {
-		environment = tmfsync.DOME_PRO
+		environment = constants.DOME_PRO
 		fmt.Println("Using the PRODUCTION environment")
 	} else {
 		fmt.Println("Using the DEV2 environment")
@@ -51,7 +83,7 @@ func main() {
 	var gr run.Group
 
 	// Configure the PDP server to receive/authorize intercepted requests
-	tmfConfig, execute, interrupt, err := tmapi.HttpServerHandler(environment, *pdpAddress)
+	tmfConfig, execute, interrupt, err := tmapi.HttpServerHandler(environment, *pdpAddress, *debug)
 	if err != nil {
 		panic(err)
 	}

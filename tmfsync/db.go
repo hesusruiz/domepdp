@@ -42,14 +42,20 @@ const CheckIfExistsTMFObjectSQL = `SELECT id, hash, updated FROM tmfobject WHERE
 
 func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) (bool, []byte, int, error) {
 
-	if dbconn == nil {
-		var err error
-		dbconn, err = tmf.dbpool.Take(context.Background())
-		if err != nil {
-			return false, nil, 0, err
-		}
-		defer tmf.dbpool.Put(dbconn)
+	// if dbconn == nil {
+	// 	var err error
+	// 	dbconn, err = tmf.dbpool.Take(context.Background())
+	// 	if err != nil {
+	// 		return false, nil, 0, err
+	// 	}
+	// 	defer tmf.dbpool.Put(dbconn)
+	// }
+
+	dbconn, err := tmf.RequestDB(dbconn)
+	if err != nil {
+		return false, nil, 0, err
 	}
+	defer tmf.ReleaseDB(dbconn)
 
 	// Check if the row already exists, with the same version
 	selectStmt, err := dbconn.Prepare(CheckIfExistsTMFObjectSQL)
@@ -314,7 +320,7 @@ func (tmf *TMFdb) RetrieveLocalListTMFObject(dbconn *sqlite.Conn, tmfType string
 
 	sql, args := buildSelectFromParms(tmfType, qv)
 
-	slog.Info("RetrieveLocalListTMFObject", "sql", sql, "args", args)
+	// slog.Info("RetrieveLocalListTMFObject", "sql", sql, "args", args)
 
 	var resultPOs []*TMFObject
 
@@ -354,6 +360,6 @@ func (tmf *TMFdb) RetrieveLocalListTMFObject(dbconn *sqlite.Conn, tmfType string
 		return nil, false, err
 	}
 
-	slog.Info("%%%%%%%%%", "po", resultPOs)
+	slog.Debug("RetrieveLocalListTMFObject", "sql", sql, "args", args, "objects", resultPOs)
 	return resultPOs, true, nil
 }

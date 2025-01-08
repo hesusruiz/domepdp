@@ -15,6 +15,9 @@ require (
 require (
 	github.com/go-jose/go-jose/v4 v4.0.4 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/samber/lo v1.47.0 // indirect
+	github.com/samber/slog-formatter v1.1.1 // indirect
+	github.com/samber/slog-multi v1.2.4 // indirect
 	go.opentelemetry.io/otel v1.33.0 // indirect
 	golang.org/x/crypto v0.25.0 // indirect
 )

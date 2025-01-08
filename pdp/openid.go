@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/tmfsync"
+	"github.com/hesusruiz/domeproxy/constants"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -136,14 +136,14 @@ func DOME_JWKS() (jose.JSONWebKeySet, error) {
 }
 
 const DOME_DEV2_WellKnown = "https://verifier.dome-marketplace-dev2.org/.well-known/openid-configuration"
+const DOME_PRO_WellKnown = "https://verifier.dome-marketplace-prd.org/.well-known/openid-configuration"
 
-func NewOpenIDConfig(environment tmfsync.Environment) (*OpenIDConfig, error) {
-	oid := &OpenIDConfig{}
+func NewOpenIDConfig(environment constants.Environment) (*OpenIDConfig, error) {
 
 	verifierWellKnownURL := DOME_DEV2_WellKnown
 
-	if environment == tmfsync.DOME_PRO {
-		verifierWellKnownURL = "https://verifier.dome-marketplace-dev2.prd/.well-known/openid-configuration"
+	if environment == constants.DOME_PRO {
+		verifierWellKnownURL = DOME_PRO_WellKnown
 	}
 
 	res, err := http.Get(verifierWellKnownURL)
@@ -162,6 +162,7 @@ func NewOpenIDConfig(environment tmfsync.Environment) (*OpenIDConfig, error) {
 		return nil, err
 	}
 
+	oid := &OpenIDConfig{}
 	err = json.Unmarshal(body, oid)
 	if err != nil {
 		slog.Error("unmarshalling", slogor.Err(err))
@@ -170,34 +171,6 @@ func NewOpenIDConfig(environment tmfsync.Environment) (*OpenIDConfig, error) {
 
 	if oid.JwksUri == "" {
 		return nil, fmt.Errorf("no JwksUri")
-	}
-
-	var jwks = &jose.JSONWebKeySet{}
-
-	res, err = http.Get(oid.JwksUri)
-	if err != nil {
-		slog.Error(err.Error())
-		return nil, err
-	}
-	body, err = io.ReadAll(res.Body)
-	res.Body.Close()
-	if res.StatusCode > 299 {
-		err := fmt.Errorf("response failed with status: %d", res.StatusCode)
-		return nil, err
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	err = json.Unmarshal(body, jwks)
-	if err != nil {
-		slog.Error("unmarshalling JWKS", slogor.Err(err))
-		return nil, err
-	}
-
-	if len(jwks.Keys) == 0 {
-		err := fmt.Errorf("no JWK keys returned")
-		return nil, err
 	}
 
 	return oid, nil

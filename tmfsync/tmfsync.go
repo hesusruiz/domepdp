@@ -171,6 +171,23 @@ func createTables(dbpool *sqlitex.Pool) error {
 	return nil
 }
 
+func (tmf *TMFdb) RequestDB(dbconn *sqlite.Conn) (*sqlite.Conn, error) {
+	if dbconn != nil {
+		return dbconn, nil
+	}
+
+	var err error
+	dbconn, err = tmf.dbpool.Take(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return dbconn, nil
+}
+
+func (tmf *TMFdb) ReleaseDB(dbconn *sqlite.Conn) {
+	tmf.dbpool.Put(dbconn)
+}
+
 func (tmf *TMFdb) Close() {
 	tmf.dbpool.Close()
 }
