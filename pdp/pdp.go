@@ -1,6 +1,7 @@
 // Copyright 2023 Jesus Ruiz. All rights reserved.
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
+
 package pdp
 
 import (
@@ -11,6 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,10 +33,28 @@ import (
 	"go.starlark.net/syntax"
 )
 
-// X-Original-URI $request_uri;
-// X-Original-Method $request_method
-// X-Original-Remote-Addr $remote_addr;
-// X-Original-Host $host;
+func init() {
+	// Add our built-ins to the Starlark Universe dictionary before any evaluation begins.
+	// All values here must be immutable and shared among all instances of the PDP.
+	// See here for the standard Starlark entities:
+	// https://github.com/google/starlark-go/blob/master/doc/spec.md#built-in-constants-and-functions
+
+	// Create a StarLark module with our own utility functions
+	var Module = &starlarkstruct.Module{
+		Name: "star",
+		Members: st.StringDict{
+			"getinput": st.NewBuiltin("getinput", getInputElement),
+			"getbody":  st.NewBuiltin("getbody", getRequestBody),
+		},
+	}
+
+	// Set the global Starlark environment with required modules, including our own
+	st.Universe["json"] = starjson.Module
+	st.Universe["time"] = sttime.Module
+	st.Universe["math"] = math.Module
+	st.Universe["star"] = Module
+
+}
 
 // Decision can be Authenticate or Authorize
 type Decision int
@@ -49,35 +70,73 @@ func (d Decision) String() string {
 	}
 }
 
-// PDP implements a simple Policy Decision Point in Starlark
+// PDP implements a simple Policy Decision Point in Starlark, for use in the DOME project.
+//
+// There can be several instances simultaneously, and each instance is safe for concurrent
+// use by different goroutines.
 type PDP struct {
-	scriptname  string
-	verifierJWK jose.JSONWebKey
-	debug       bool
-	fileCache   sync.Map
-	threadPool  sync.Pool
+
+	// environment is the run-time environment (production or development) where the PDP executes.
+	// Some things behave differently by default, like logging level.
+	environment constants.Environment
+
+	// The name of the file where the policy rules resides.
+	scriptname string
+
+	// The function used at runtime to read the files. If not specified by the caller,
+	// a default implementation is used, which uses the file system.
+	readFileFun func(fileName string) ([]byte, bool, error)
+
+	// The public key used to verify the Access Tokens. In DOME they belong to the Verifier,
+	// and the PDP retrieves it dynamically depending on the environment.
+	// The caller is able to provide a function to retrieve the key from a different place.
+	verifierJWK        *jose.JSONWebKey
+	verificationKeyFun func(environment constants.Environment) (*jose.JSONWebKey, error)
+
+	debug bool
+
+	// The file cache to read the policy files. Modifications to the original file
+	// are picked automatically according to a freshness policy.
+	fileCache sync.Map
+
+	// The pool of instances of the policy execution engines, to minimize startup
+	// and teardown overheads.
+	threadPool sync.Pool
 }
 
-func NewPDP(environment constants.Environment, fileName string, debug bool) (*PDP, error) {
-
-	// Create a StarLark module with our own utility functions
-	var Module = &starlarkstruct.Module{
-		Name: "star",
-		Members: st.StringDict{
-			"getbody": st.NewBuiltin("getbody", getRequestBody),
-		},
-	}
-
-	// Set the global Starlark environment with required modules, including our own
-	st.Universe["json"] = starjson.Module
-	st.Universe["time"] = sttime.Module
-	st.Universe["math"] = math.Module
-	st.Universe["star"] = Module
+func NewPDP(environment constants.Environment,
+	fileName string,
+	debug bool,
+	readFileFun func(fileName string) ([]byte, bool, error),
+	verificationKeyFunc func(environment constants.Environment) (*jose.JSONWebKey, error),
+) (*PDP, error) {
 
 	m := &PDP{}
+	m.environment = environment
 	m.scriptname = fileName
 	m.fileCache = sync.Map{}
 
+	if readFileFun == nil {
+		m.readFileFun = m.readFileIfNew
+	} else {
+		m.readFileFun = readFileFun
+	}
+
+	if verificationKeyFunc == nil {
+		m.verificationKeyFun = defaultVerificationKey
+	} else {
+		m.verificationKeyFun = verificationKeyFunc
+	}
+
+	// Retrieve the key at initialization time, to discover any possible
+	// error in environment configuration as early as possible (eg, the Verifier is not running).
+	var err error
+	m.verifierJWK, err = verificationKeyFunc(environment)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the pool of parsed and compiled Starlark policy rules.
 	m.threadPool = sync.Pool{
 		New: func() any {
 			// The Pool's New function should generally only return pointer
@@ -87,23 +146,42 @@ func NewPDP(environment constants.Environment, fileName string, debug bool) (*PD
 		},
 	}
 
-	oid, err := NewOpenIDConfig(environment)
-	if err != nil {
-		panic(err)
-	}
-
-	m.verifierJWK, err = oid.VerificationJWK()
-	if err != nil {
-		panic(err)
-	}
-
 	m.debug = debug
 
 	return m, nil
 }
 
+// defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
+//
+// It receives the runtime environment, enabilng a different mechanism depending on it.
+func defaultVerificationKey(environment constants.Environment) (*jose.JSONWebKey, error) {
+
+	// Retrieve the OpenID configuration from the Verifier
+	oid, err := NewOpenIDConfig(environment)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use the link in the OpenID config to retrieve the key from the Verifier.
+	// In DOME, we use the first key from the keyset retrieved.
+	verifierJWK, err := oid.VerificationJWK()
+	if err != nil {
+		return nil, err
+	}
+
+	return verifierJWK, nil
+
+}
+
+// threadEntry represents the pool of Starlark threads for policy rules execution.
+// All instances are normally the same, using the same compiled version of the same file.
+// The pool increases concurrency because a given Starlark thread can be reused
+// among goroutines, but not used concurrently.
+// Another benefit is that it facilitates the dynamic update of policy files without
+// affecting concurrency.
 type threadEntry struct {
 	globals              st.StringDict
+	predeclared          st.StringDict
 	thread               *st.Thread
 	authenticateFunction *st.Function
 	authorizeFunction    *st.Function
@@ -115,7 +193,6 @@ type threadEntry struct {
 // one for athentication and the second for athorisation.
 // ParseAndCompileFile can be called several times and will perform a new compilation every time,
 // creating a new Thread and so the old ones will never be called again and eventually will be disposed.
-
 func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 	slog.Debug("===> BufferedParseAndCompileFile")
 	var err error
@@ -123,38 +200,39 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 	te := &threadEntry{}
 	te.scriptname = scriptname
 
+	logger := slog.Default()
+
 	// The compiled program context will be stored in a new Starlark thread for each invocation
 	te.thread = &st.Thread{
-		Load:  repl.MakeLoadOptions(&syntax.FileOptions{}),
-		Print: func(_ *st.Thread, msg string) { slog.Debug("rules => " + msg) },
-		Name:  "exec " + scriptname,
+		Load: repl.MakeLoadOptions(&syntax.FileOptions{}),
+		Print: func(_ *st.Thread, msg string) {
+			logger.Info("rules => " + msg)
+		},
+		Name: "exec " + scriptname,
 	}
 
-	// Create a predeclared environment specific for this module (empy for the moment)
-	predeclared := make(st.StringDict)
+	// Create a predeclared environment specific for this module (empty for the moment)
+	te.predeclared = st.StringDict{}
+	te.predeclared["input"] = StarTMFMap{}
 
-	src, _, err := m.readFileIfNew(scriptname)
+	src, _, err := m.readFileFun(scriptname)
 	if err != nil {
 		slog.Error("reading script", slogor.Err(err), "file", scriptname)
 		return nil
 	}
 
 	// Parse and execute the top-level commands in the script file
-	te.globals, err = st.ExecFileOptions(&syntax.FileOptions{}, te.thread, scriptname, src, predeclared)
+	te.globals, err = st.ExecFileOptions(&syntax.FileOptions{}, te.thread, scriptname, src, te.predeclared)
 	if err != nil {
-		log.Println("error compiling Starlark program")
+		slog.Error("error compiling Starlark program", slogor.Err(err))
 		return nil
 	}
 
+	// Make sure that the global environment is frozen so the Startlark
 	te.globals.Freeze()
-	// There should be two functions: 'authenticate' and 'authorize', called at the proper moments
 
-	// m.authenticateFunction, err = m.getGlobalFunction("authenticate")
-	// The authentication function is optional, for the moment
-	// if err != nil {
-	// 	return err
-	// }
-
+	// The module has to define a function called 'authorize', which will be invoked
+	// for each request to access protected resources.
 	te.authorizeFunction, err = getGlobalFunction(te.globals, "authorize")
 	if err != nil {
 		return nil
@@ -165,6 +243,7 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 
 }
 
+// getGlobalFunction retrieves a Callable from the globals dictionary.
 func getGlobalFunction(globals st.StringDict, funcName string) (*st.Function, error) {
 
 	// Check that we have the function
@@ -186,15 +265,17 @@ func getGlobalFunction(globals st.StringDict, funcName string) (*st.Function, er
 	return starFunction, nil
 }
 
-const maxFileSize = 1024 * 1024
-const freshness = 20 * time.Second
-
+// fileEntry implements a file cache to improve performance while being able to pick newer
+// versions of the rules in a reasonable time (20 secods by default).
 type fileEntry struct {
 	name         string
 	entryUpdated time.Time
 	fileModTime  time.Time
 	content      []byte
 }
+
+const maxFileSize = 1024 * 1024
+const freshness = 20 * time.Second
 
 func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 
@@ -205,7 +286,7 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 	if found {
 		entry := fe.(*fileEntry)
 
-		// Check if the entry is fresh enough (for the moment, 3 secs)
+		// Return the entry if it is fresh enough.
 		if now.Sub(entry.entryUpdated) < freshness {
 			slog.Debug("found and cache entry is fresh")
 			return entry.content, true, nil
@@ -213,6 +294,9 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 		slog.Debug("found but entry is NOT fresh")
 	}
 
+	// We are here because either the entry was not found or is not fresh.
+	// Get the file info, to check if it was modified.
+	// We discard directories.
 	fileInfo, err := os.Stat(fileName)
 	if err != nil {
 		return nil, false, err
@@ -227,10 +311,9 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 
 	modifiedAt := fileInfo.ModTime()
 
-	// If the entry was not found, read the file and set it in the cache
+	// If not found, read the file, set in the cache and return the file.
 	if !found {
 		slog.Debug("entry not found in cache")
-		// Read the file
 		content, err := os.ReadFile(fileName)
 		if err != nil {
 			return nil, false, err
@@ -252,9 +335,6 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 
 	// The entry was found in the cache, but it may be stale.
 	entry := fe.(*fileEntry)
-
-	// Get the file info, to check if it was modified
-	// We discard directories
 
 	if entry.fileModTime.Before(modifiedAt) {
 
@@ -278,9 +358,8 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 
 	} else {
 
+		// The entry in the cache is still valid, update the timestamp and return the file.
 		slog.Debug("entry was not fresh but still valid")
-		// The entry in the cache is still valid, update the timestamp and return the entry
-		// Update the timestamp of the entry
 		entry.entryUpdated = now
 
 		// And return contents
@@ -294,7 +373,8 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 // for the decision. They are:
 // - the Verifiable Credential with the information from the caller needed for the decision
 // - the protected resource that the caller identified in the Credential wants to access
-func (m *PDP) TakeAuthnDecision(decision Decision, r *http.Request, tokString string, tmfObject *tmfsync.TMFObject) (bool, error) {
+
+func (m *PDP) TakeAuthnDecisionOPAStyle(decision Decision, r *http.Request, tokString string, tmfObject *tmfsync.TMFObject) (bool, error) {
 	var err error
 
 	// Verify the token and extract the claims.
@@ -365,15 +445,12 @@ func (m *PDP) TakeAuthnDecision(decision Decision, r *http.Request, tokString st
 		oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
 	}
 
-	if tmfObject.ID == "urn:ngsi-ld:product-specification:7117147e-9e45-4862-acff-ffd2f2a477e2" {
-		slog.Error("tmf", "o", tmfObject, "content", tmfObject.ContentMap)
+	// tmfArgument, err := mapToStarlark(oMap)
+	// if err != nil {
+	// 	return false, err
+	// }
 
-	}
-
-	tmfArgument, err := mapToStarlark(oMap)
-	if err != nil {
-		return false, err
-	}
+	tmfArgument := StarTMFMap(oMap)
 
 	// Get a Starlark Thread to execute the evaluation of the policies
 	ent := m.threadPool.Get()
@@ -383,6 +460,9 @@ func (m *PDP) TakeAuthnDecision(decision Decision, r *http.Request, tokString st
 	defer m.threadPool.Put(ent)
 
 	te := ent.(*threadEntry)
+	if te == nil {
+		return false, fmt.Errorf("getting a thread entry from pool")
+	}
 
 	te.thread.SetLocal("httprequest", r)
 
@@ -419,6 +499,90 @@ func (m *PDP) TakeAuthnDecision(decision Decision, r *http.Request, tokString st
 	// Return the value as a Go boolean
 	return bool(result.(st.Bool).Truth()), nil
 
+}
+
+func (m *PDP) TakeAuthnDecision(decision Decision, requestArgument StarTMFMap, tokenArgument StarTMFMap, tmfArgument StarTMFMap) (bool, error) {
+	var err error
+
+	// Get a Starlark Thread from the pool to evaluate the policies.
+	ent := m.threadPool.Get()
+	if ent == nil {
+		return false, fmt.Errorf("getting a thread entry from pool")
+	}
+	defer m.threadPool.Put(ent)
+
+	te := ent.(*threadEntry)
+	if te == nil {
+		return false, fmt.Errorf("getting a thread entry from pool")
+	}
+
+	// Assemble all data in a single "input" argument, to the style of OPA
+	// inputNative := map[string]any{
+	// 	"request": requestArgument,
+	// 	"token":   tokenArgument,
+	// 	"tmf":     tmfArgument,
+	// }
+	// input := StarTMFMap(inputNative)
+
+	// Assemble all data in a single "input" argument, to the style of OPA.
+	// We mutate the predeclared identifier, so the policy can access the data for this request.
+	// We can also service possible callbacks from the rules engine.
+	uniMap := te.predeclared["input"].(StarTMFMap)
+	uniMap["request"] = requestArgument
+	uniMap["token"] = tokenArgument
+	uniMap["tmf"] = tmfArgument
+
+	// Build the arguments to the StarLark function, which is empty.
+	var args st.Tuple
+
+	// Call the corresponding function in the Starlark Thread
+	var result st.Value
+	if decision == Authenticate {
+		// Call the 'authenticate' funcion
+		result, err = st.Call(te.thread, te.authenticateFunction, args, nil)
+	} else {
+		// Call the 'authorize' function
+		result, err = st.Call(te.thread, te.authorizeFunction, args, nil)
+	}
+
+	if err != nil {
+		fmt.Printf("rules ERROR: %s\n", err.(*st.EvalError).Backtrace())
+		return false, fmt.Errorf("error calling function: %w", err)
+	}
+
+	// Check that the value returned is of the correct type (boolean)
+	resultType := result.Type()
+	if resultType != "bool" {
+		err := fmt.Errorf("function returned wrong type: %v", resultType)
+		return false, err
+	}
+
+	// Return the value as a Go boolean
+	return bool(result.(st.Bool).Truth()), nil
+
+}
+
+func getInputElement(thread *st.Thread, _ *st.Builtin, args st.Tuple, kwargs []st.Tuple) (st.Value, error) {
+
+	// Get the current input structure being processed
+	r := thread.Local("inputrequest")
+	input, ok := r.(StarTMFMap)
+	if !ok {
+		return st.None, fmt.Errorf("no request found in thread locals")
+	}
+
+	// Get the element
+	var elemPath string
+	err := st.UnpackPositionalArgs("input2", args, kwargs, 1, &elemPath)
+	if err != nil {
+		return nil, err
+	}
+
+	elem, err := GetValue(input, elemPath)
+	if err != nil {
+		return st.None, nil
+	}
+	return elem, nil
 }
 
 func getRequestBody(thread *st.Thread, _ *st.Builtin, args st.Tuple, kwargs []st.Tuple) (st.Value, error) {
@@ -543,31 +707,204 @@ func getSkylarkList(values []string) *st.List {
 	return list
 }
 
-type StarTMF map[string]any
+type StarTMFMap map[string]any
 
-func (s StarTMF) String() string        { return s["id"].(string) }
-func (s StarTMF) GoString() string      { return s["id"].(string) }
-func (s StarTMF) Type() string          { return "tmfobject" }
-func (s StarTMF) Freeze()               {} // immutable
-func (s StarTMF) Truth() st.Bool        { return len(s) > 0 }
-func (s StarTMF) Hash() (uint32, error) { return hashString(s["id"].(string)), nil }
-func (s StarTMF) Len() int              { return len(s) } // number of entries
+// Value interface
+func (s StarTMFMap) String() string {
+	out := new(strings.Builder)
 
-func (s StarTMF) Attr(name string) (st.Value, error) {
-	value, ok := s[name]
-	if ok {
-		return st.String(value.(string)), nil
-	} else {
-		return nil, nil
+	out.WriteByte('{')
+	sep := ""
+	for k, v := range s {
+		out.WriteString(sep)
+		s := fmt.Sprintf("%v", k)
+		out.WriteString(s)
+		out.WriteString(": ")
+
+		val := anyToValue(v)
+		s = fmt.Sprintf("%v", val.String())
+		out.WriteString(s)
+		sep = ", "
+	}
+	out.WriteByte('}')
+	return out.String()
+
+}
+func (s StarTMFMap) GoString() string      { return s["id"].(string) }
+func (s StarTMFMap) Type() string          { return "tmfmap" }
+func (s StarTMFMap) Freeze()               {} // immutable
+func (s StarTMFMap) Truth() st.Bool        { return len(s) > 0 }
+func (s StarTMFMap) Hash() (uint32, error) { return hashString(s["id"].(string)), nil }
+
+// Indexable interface
+func (s StarTMFMap) Len() int { return len(s) } // number of entries
+// Index(i int) Value // requires 0 <= i < Len()
+
+// Mapping interface
+func (s StarTMFMap) Get(name st.Value) (v st.Value, found bool, err error) {
+
+	path := string(name.(st.String))
+
+	// Quick short-circuit
+	if path == "" || path == "." {
+		return s, true, nil
+	}
+
+	// Two consecutive dots is an error
+	if strings.Contains(path, "..") {
+		return nil, false, fmt.Errorf("invalid path %q: contains '..'", path)
+	}
+
+	// vv, err := jpath.Get(s, string(name.(st.String)))
+	vv, err := GetValue(s, string(name.(st.String)))
+	if err != nil {
+		return nil, false, err
+	}
+	v = anyToValue(vv)
+	return v, true, nil
+
+	// value, err := s.Attr(string(string(name.(st.String))))
+	// if err != nil {
+	// 	return nil, false, err
+	// }
+	// return value, true, nil
+}
+
+// Get returns a child of the given value according to a dotted path.
+// The source data must be either map[string]any or []any
+func GetValue(a StarTMFMap, path string) (st.Value, error) {
+
+	parts := strings.Split(path, ".")
+
+	var src st.Value = a
+
+	// Get the value.
+	for pos, pathComponent := range parts {
+
+		switch src.Type() {
+
+		case "tmfmap":
+			c := src.(StarTMFMap)
+
+			if value, ok := c[pathComponent]; ok {
+				src = anyToValue(value)
+				continue
+			} else {
+				return st.None, nil
+				// return nil, fmt.Errorf("jpath.Get: nonexistent map key at %q",
+				// 	strings.Join(parts[:pos+1], "."))
+			}
+
+		case "tmflist":
+			c := src.(StarTMFList)
+
+			// If data is an array, the path component must be an integer (base 10) to index the array
+			index, err := strconv.ParseInt(pathComponent, 10, 0)
+			if err != nil {
+				return nil, fmt.Errorf("jpath.Get: invalid list index at %q",
+					strings.Join(parts[:pos+1], "."))
+			}
+			if int(index) < len(c) {
+				// Update src to be the indexed element of the array
+				value := c[index]
+				src = anyToValue(value)
+				continue
+			} else {
+				return nil, fmt.Errorf(
+					"jpath.Get: index out of range at %q: list has only %v items",
+					strings.Join(parts[:pos+1], "."), len(c))
+			}
+
+		default:
+
+			return nil, fmt.Errorf(
+				"jpath.Get: invalid type at %q: expected []any or map[string]any; got %T",
+				strings.Join(parts[:pos+1], "."), src)
+		}
+	}
+
+	return src, nil
+}
+
+func anyToValue(value any) st.Value {
+	switch v := value.(type) {
+	case StarTMFMap:
+		return StarTMFMap(v)
+	case StarTMFList:
+		return StarTMFList(v)
+	case string:
+		return st.String(v)
+	case st.String:
+		return st.String(v)
+	case map[string]any:
+		return StarTMFMap(v)
+	case []any:
+		var l []st.Value
+		for _, elem := range v {
+			l = append(l, anyToValue(elem))
+		}
+		return StarTMFList(l)
+	case bool:
+		return st.Bool(v)
+	case float64:
+		return st.Float(v)
+	case int:
+		return st.MakeInt(v)
+	default:
+		return st.None
 	}
 }
 
-func (s StarTMF) AttrNames() []string {
+// HasAttrs interface
+// Attr(name string) (st.Value, error)
+// AttrNames() []string
+
+func (s StarTMFMap) Attr(name string) (st.Value, error) {
+	value, ok := s[name]
+	if !ok {
+		return nil, nil
+	}
+
+	return anyToValue(value), nil
+
+}
+
+func (s StarTMFMap) AttrNames() []string {
 	var keys []string
 	for key := range s {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+type StarTMFList []st.Value
+
+// Value interface
+func (s StarTMFList) String() string {
+	out := new(strings.Builder)
+
+	out.WriteByte('[')
+	for i, elem := range s {
+		if i > 0 {
+			out.WriteString(", ")
+		}
+		s := fmt.Sprintf("%v", elem)
+		out.WriteString(s)
+	}
+	out.WriteByte(']')
+
+	return out.String()
+}
+func (s StarTMFList) Type() string          { return "tmflist" }
+func (s StarTMFList) Freeze()               {} // immutable
+func (s StarTMFList) Truth() st.Bool        { return len(s) > 0 }
+func (s StarTMFList) Hash() (uint32, error) { return hashString("tmflist"), nil }
+
+// Indexable interface
+func (s StarTMFList) Len() int { return len(s) } // number of entries
+func (s StarTMFList) Index(i int) st.Value {
+	value := s[i]
+	return anyToValue(value)
 }
 
 var seed = maphash.MakeSeed()
@@ -597,27 +934,28 @@ func softHashString(s string) uint32 {
 // The most important claim in the payload is the LEARCredential that was used for authentication.
 func (m *PDP) getClaimsFromToken(tokString string) (nativeMapClaims map[string]any, found bool, err error) {
 	var token *jwt.Token
-	nativeMapClaims = map[string]any{}
+	var theClaims = MapClaims{}
 
 	if tokString == "" {
-		return nativeMapClaims, false, nil
+		return nil, false, nil
 	}
 
 	verifierPublicKeyFunc := func(*jwt.Token) (interface{}, error) {
+		if m.verifierJWK == nil {
+			slog.Error("verifierJWK not initialized")
+			return nil, fmt.Errorf("verifierJWK not initialized")
+		}
 		slog.Debug("publicKeyFunc", "key", m.verifierJWK)
 		return m.verifierJWK.Key, nil
 	}
 
 	// Validate and verify the token
-	token, err = jwt.NewParser().ParseWithClaims(tokString, MapClaims{}, verifierPublicKeyFunc)
+	token, err = jwt.NewParser().ParseWithClaims(tokString, &theClaims, verifierPublicKeyFunc)
 	if err != nil {
-		return nativeMapClaims, false, err
+		return nil, false, err
 	}
 
-	jwtmapClaims := token.Claims.(MapClaims)
-	// for k, v := range jwtmapClaims {
-	// 	nativeMapClaims[k] = v
-	// }
+	jwtmapClaims := token.Claims.(*MapClaims)
 
-	return jwtmapClaims, true, nil
+	return *jwtmapClaims, true, nil
 }

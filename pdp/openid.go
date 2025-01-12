@@ -176,40 +176,39 @@ func NewOpenIDConfig(environment constants.Environment) (*OpenIDConfig, error) {
 	return oid, nil
 }
 
-func (oid *OpenIDConfig) VerificationJWK() (jose.JSONWebKey, error) {
-	var jwks = &jose.JSONWebKeySet{}
-	var jwk = jose.JSONWebKey{}
+func (oid *OpenIDConfig) VerificationJWK() (*jose.JSONWebKey, error) {
 
 	if oid.JwksUri == "" {
-		return jwk, fmt.Errorf("no JwksUri")
+		return nil, fmt.Errorf("no JwksUri")
 	}
 
 	res, err := http.Get(oid.JwksUri)
 	if err != nil {
 		slog.Error(err.Error())
-		return jwk, err
+		return nil, err
 	}
 	body, err := io.ReadAll(res.Body)
 	res.Body.Close()
 	if res.StatusCode > 299 {
 		err := fmt.Errorf("response failed with status: %d", res.StatusCode)
-		return jwk, err
+		return nil, err
 	}
 	if err != nil {
-		return jwk, err
+		return nil, err
 	}
 
+	var jwks = &jose.JSONWebKeySet{}
 	err = json.Unmarshal(body, jwks)
 	if err != nil {
 		slog.Error("unmarshalling JWKS", slogor.Err(err))
-		return jwk, err
+		return nil, err
 	}
 
 	if len(jwks.Keys) == 0 {
 		err := fmt.Errorf("no JWK keys returned")
-		return jwk, err
+		return nil, err
 	}
 
-	return jwks.Keys[0], nil
+	return &jwks.Keys[0], nil
 
 }

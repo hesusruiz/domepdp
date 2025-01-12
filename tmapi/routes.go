@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/goccy/go-json"
@@ -15,12 +14,6 @@ import (
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )
-
-// The standard HTTP error response for TMF APIs
-type ErrorTMF struct {
-	Code   string `json:"code"`
-	Reason string `json:"reason"`
-}
 
 // tokenFromHeader retrieves the token string in the authorization header of an HTTP request
 func tokenFromHeader(r *http.Request) string {
@@ -49,7 +42,7 @@ func addHttpRoutes(
 	)
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	ruleEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug)
+	ruleEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug, nil, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -84,7 +77,7 @@ func handleGETlist(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func
 		slog.Info("GET LIST", "type", tmfType)
 		tmfObjectList, err := retrieveList(tmf, tmfType, r)
 		if err != nil {
-			sendError(w, "error retrieving", err.Error())
+			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
 			slog.Error("retrieving", slogor.Err(err))
 			return
 		}
@@ -96,15 +89,12 @@ func handleGETlist(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func
 
 		out, err := json.Marshal(listMaps)
 		if err != nil {
-			sendError(w, "error marshalling list", err.Error())
+			errorTMF(w, http.StatusInternalServerError, "error marshalling list", err.Error())
 			slog.Error("error marshalling list", slogor.Err(err))
 			return
 		}
 
-		w.Header().Set("Content-Length", strconv.Itoa(len(out)))
-		w.Header().Set("Content-Type", "application/json;charset=utf-8")
-		w.Header().Set("X-Powered-By", "MITM Proxy")
-		w.Write(out)
+		replyTMF(w, out)
 
 	}
 }
@@ -130,24 +120,24 @@ func handleGET(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngi
 		// We need this so the rule engine can evaluate the policies using the data from the object.
 		tmfObject, err := retrieveObject(tmf, tmfType, r)
 		if err != nil {
-			sendError(w, "error retrieving", err.Error())
+			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
 			slog.Error("retrieving", slogor.Err(err))
 			return
 		}
 
 		// Ask the rules engine for a decision on this request
-		decision, err := ruleEngine.TakeAuthnDecision(pdp.Authorize, r, tokString, tmfObject)
+		decision, err := ruleEngine.TakeAuthnDecisionOPAStyle(pdp.Authorize, r, tokString, tmfObject)
 
 		// An error is considered a rejection
 		if err != nil {
-			sendError(w, "error taking decision", err.Error())
+			errorTMF(w, http.StatusInternalServerError, "error taking decision", err.Error())
 			slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
 			return
 		}
 
 		// The rules engine rejected the request
 		if !decision {
-			sendError(w, "not authenticated", "the policies said NOT!!!")
+			errorTMF(w, http.StatusUnauthorized, "not authenticated", "the policies said NOT!!!")
 			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
 			return
 		}
@@ -155,9 +145,7 @@ func handleGET(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngi
 		// The rules engine accepted the request, return it to the caller
 		slog.Info("Authorized Authorized")
 
-		w.Header().Set("Content-Length", strconv.Itoa(len(tmfObject.Content)))
-		w.Header().Set("Content-Type", "application/json;charset=utf-8")
-		w.Write(tmfObject.Content)
+		replyTMF(w, tmfObject.Content)
 
 	}
 }
@@ -247,7 +235,7 @@ func handleGETAuthorization(logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine 
 		}
 
 		// Ask the rules engine for a decision on this request
-		decision, err := ruleEngine.TakeAuthnDecision(pdp.Authorize, r, tokString, tmfObject)
+		decision, err := ruleEngine.TakeAuthnDecisionOPAStyle(pdp.Authorize, r, tokString, tmfObject)
 
 		// An error is considered a rejection
 		if err != nil {
@@ -258,7 +246,7 @@ func handleGETAuthorization(logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine 
 
 		// The rules engine rejected the request
 		if !decision {
-			sendError(w, "not authenticated", "the policies said NOT!!!")
+			errorTMF(w, http.StatusUnauthorized, "not authenticated", "the policies said NOT!!!")
 			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
 			http.Error(w, "not authorized", http.StatusUnauthorized)
 			return
@@ -270,17 +258,6 @@ func handleGETAuthorization(logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 	}
-}
-
-func sendError(w http.ResponseWriter, code string, reason string) {
-	errtmf := &ErrorTMF{
-		Code:   code,
-		Reason: reason,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(errtmf)
-
 }
 
 func retrieveObject(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) (*tmfsync.TMFObject, error) {

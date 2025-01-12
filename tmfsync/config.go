@@ -15,13 +15,14 @@ const DEV2_dbname = "./tmf-dev2.db"
 const PRO_dbname = "./tmf.db"
 
 type Config struct {
-	environment constants.Environment
+	Environment constants.Environment
+	RootDir     string
 	CaCertFile  string
 	CaKeyFile   string
 
 	HostTargets []string
-	domeServer  string
-	dbname      string
+	DomeServer  string
+	Dbname      string
 }
 
 func LoadConfig() *Config {
@@ -50,19 +51,19 @@ var DEV2HostTargets = []string{
 }
 
 func DefaultConfig(where constants.Environment) *Config {
-	conf := &Config{environment: where}
+	conf := &Config{Environment: where}
 
 	if where == constants.DOME_DEV2 {
 
 		conf.HostTargets = DEV2HostTargets
-		conf.domeServer = DEV2_DOMEServer
-		conf.dbname = DEV2_dbname
+		conf.DomeServer = DEV2_DOMEServer
+		conf.Dbname = DEV2_dbname
 
 	} else if where == constants.DOME_PRO {
 
 		conf.HostTargets = PROHostTargets
-		conf.domeServer = PRO_DOMEServer
-		conf.dbname = PRO_dbname
+		conf.DomeServer = PRO_DOMEServer
+		conf.Dbname = PRO_dbname
 
 	} else {
 

@@ -2,6 +2,7 @@ package jpath
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -247,7 +248,7 @@ func Get(src any, path string) (any, error) {
 			// If data is an array, the path component must be an integer (base 10) to index the array
 			index, err := strconv.ParseInt(pathComponent, 10, 0)
 			if err != nil {
-				return nil, fmt.Errorf("invalid list index at %q",
+				return nil, fmt.Errorf("jpath.Get: invalid list index at %q",
 					strings.Join(parts[:pos+1], "."))
 			}
 			if int(index) < len(c) {
@@ -255,7 +256,7 @@ func Get(src any, path string) (any, error) {
 				src = c[index]
 			} else {
 				return nil, fmt.Errorf(
-					"index out of range at %q: list has only %v items",
+					"jpath.Get: index out of range at %q: list has only %v items",
 					strings.Join(parts[:pos+1], "."), len(c))
 			}
 
@@ -264,13 +265,53 @@ func Get(src any, path string) (any, error) {
 			if value, ok := c[pathComponent]; ok {
 				src = value
 			} else {
-				return nil, fmt.Errorf("nonexistent map key at %q",
+				return nil, fmt.Errorf("jpath.Get: nonexistent map key at %q",
 					strings.Join(parts[:pos+1], "."))
 			}
 
 		default:
+			srcKind := reflect.TypeOf(src).Kind()
+			srcValue := reflect.ValueOf(src)
+
+			if srcKind == reflect.Map {
+				newValue := srcValue.MapIndex(reflect.ValueOf(pathComponent))
+				src = newValue.Interface()
+				// if value, ok := s[pathComponent]; ok {
+				// 	src = value
+				// } else {
+				// 	return nil, fmt.Errorf("jpath.Get: nonexistent map key at %q",
+				// 		strings.Join(parts[:pos+1], "."))
+				// }
+
+				continue
+			}
+
+			if srcKind == reflect.Slice {
+				index64, err := strconv.ParseInt(pathComponent, 10, 0)
+				if err != nil {
+					return nil, fmt.Errorf("jpath.Get: invalid list index at %q",
+						strings.Join(parts[:pos+1], "."))
+				}
+				index := int(index64)
+				if index < 0 {
+					return nil, fmt.Errorf(
+						"jpath.Get: index out of range at %q: index is negative: %v",
+						strings.Join(parts[:pos+1], "."), index)
+				}
+				if index >= srcValue.Len() {
+					return nil, fmt.Errorf(
+						"jpath.Get: index out of range at %q: list has only %v items",
+						strings.Join(parts[:pos+1], "."), srcValue.Len())
+				}
+				// Update src to be the indexed element of the array
+				newValue := srcValue.Index(index)
+				src = newValue.Interface()
+
+				continue
+			}
+
 			return nil, fmt.Errorf(
-				"invalid type at %q: expected []any or map[string]any; got %T",
+				"jpath.Get: invalid type at %q: expected []any or map[string]any; got %T",
 				strings.Join(parts[:pos+1], "."), src)
 		}
 	}

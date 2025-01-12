@@ -42,20 +42,14 @@ const CheckIfExistsTMFObjectSQL = `SELECT id, hash, updated FROM tmfobject WHERE
 
 func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) (bool, []byte, int, error) {
 
-	// if dbconn == nil {
-	// 	var err error
-	// 	dbconn, err = tmf.dbpool.Take(context.Background())
-	// 	if err != nil {
-	// 		return false, nil, 0, err
-	// 	}
-	// 	defer tmf.dbpool.Put(dbconn)
-	// }
-
-	dbconn, err := tmf.RequestDB(dbconn)
-	if err != nil {
-		return false, nil, 0, err
+	if dbconn == nil {
+		var err error
+		dbconn, err = tmf.dbpool.Take(context.Background())
+		if err != nil {
+			return false, nil, 0, err
+		}
+		defer tmf.dbpool.Put(dbconn)
 	}
-	defer tmf.ReleaseDB(dbconn)
 
 	// Check if the row already exists, with the same version
 	selectStmt, err := dbconn.Prepare(CheckIfExistsTMFObjectSQL)
@@ -216,7 +210,6 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 	}
 
 	// Complete the object with the relevant fields which are in our db but not in the DOME repo
-	oMap["updated"] = stmt.GetInt64("updated")
 	oMap["organizationIdentifier"] = stmt.GetText("organizationIdentifier")
 	oMap["organization"] = stmt.GetText("organization")
 
@@ -225,6 +218,7 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 		log.Println(err)
 		return nil, false, err
 	}
+	po.Updated = stmt.GetInt64("updated")
 
 	return po, true, nil
 
