@@ -4,12 +4,14 @@
 package pdp
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +131,7 @@ def authorize():
 				panic(err)
 			}
 
-			handler := handleGETAuthorization(logger, tmf, rulesEngine)
+			handler := HandleGETAuthorization(logger, tmf, rulesEngine)
 			req := httptest.NewRequest("GET", tt.args.url, nil)
 
 			if tt.args.setHeaders {
@@ -210,7 +212,7 @@ def authorize():
 
 	for i := 0; i < b.N; i++ {
 
-		handler := handleGETAuthorization(logger, tmf, rulesEngine)
+		handler := HandleGETAuthorization(logger, tmf, rulesEngine)
 		req := httptest.NewRequest("GET", url, nil)
 
 		req.Header.Set("X-Original-URI", url)
@@ -231,4 +233,71 @@ def authorize():
 
 	}
 
+}
+
+func Test_getRestrictionElements(t *testing.T) {
+	type args struct {
+		objectName string
+		concept    string
+	}
+	tests := []struct {
+		name string
+		args args
+		want []string
+	}{
+		{
+			name: "official DOME example",
+			args: args{
+				objectName: "testdata/restrictions/example_DOME.json",
+				concept:    "permittedLegalRegion",
+			},
+			want: []string{"FR"},
+		},
+		{
+			name: "several permitted countries",
+			args: args{
+				objectName: "testdata/restrictions/several_permitted_countries.json",
+				concept:    "permittedLegalRegion",
+			},
+			want: []string{"FR", "ES", "RU", "IT"},
+		},
+		{
+			name: "several forbidden countries",
+			args: args{
+				objectName: "testdata/restrictions/several_forbidden_countries.json",
+				concept:    "forbiddenLegalRegion",
+			},
+			want: []string{"FR", "ES", "RU", "IT"},
+		},
+		{
+			name: "no permitted countries",
+			args: args{
+				objectName: "testdata/restrictions/no_permitted_countries.json",
+				concept:    "permittedLegalRegion",
+			},
+			want: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := readTest(tt.args.objectName)
+			got := getRestrictionElements(object, tt.args.concept)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("getRestrictionElements() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func readTest(fileName string) map[string]any {
+	buf, err := os.ReadFile(fileName)
+	if err != nil {
+		return nil
+	}
+	var object map[string]any
+	err = json.Unmarshal(buf, &object)
+	if err != nil {
+		return nil
+	}
+	return object
 }

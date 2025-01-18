@@ -1,3 +1,7 @@
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
+
 package tmfsync
 
 import (
@@ -19,19 +23,21 @@ import (
 
 var createTMFTableSQL = `
 CREATE TABLE IF NOT EXISTS tmfobject (
-	"id" TEXT NOT NULL PRIMARY KEY,
+	"id" TEXT NOT NULL,
+	"version" TEXT,
 	"organizationIdentifier" TEXT,
 	"organization" TEXT,
 	"type" TEXT NOT NULL,
 	"name" TEXT NOT NULL,
 	"description" TEXT,
 	"lifecycleStatus" TEXT,
-	"version" TEXT,
 	"lastUpdate" TEXT NOT NULL,
 	"content" BLOB NOT NULL,
 	"hash" BLOB,
 	"created" INTEGER,
-	"updated" INTEGER
+	"updated" INTEGER,
+
+	PRIMARY KEY ("id", "version")
 );
 PRAGMA journal_mode = WAL;`
 
@@ -114,6 +120,7 @@ func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 
 	_, err = updateStmt.Step()
 	if err != nil {
+		slog.Error("UpdateInStorage", "href", po.ID, "error", err)
 		return err
 	}
 
@@ -155,6 +162,7 @@ func (tmf *TMFdb) InsertInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 
 	_, err = insertStmt.Step()
 	if err != nil {
+		slog.Error("InsertInStorage", "href", po.ID, "error", err)
 		return err
 	}
 
@@ -191,6 +199,7 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 
 	hasRow, err := stmt.Step()
 	if err != nil {
+		slog.Error("RetrieveLocalTMFObject", "href", href, "error", err)
 		return nil, false, err
 	}
 

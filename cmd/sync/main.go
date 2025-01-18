@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -32,15 +33,15 @@ func main() {
 		server = constants.DOME_PRO
 		if *delete {
 			os.Remove(tmfsync.PRO_dbname)
-			os.Remove("./tmf.db-shm")
-			os.Remove("./tmf.db-wal")
+			os.Remove(tmfsync.PRO_dbname + "-shm")
+			os.Remove(tmfsync.PRO_dbname + "-wal")
 		}
 	} else {
 		server = constants.DOME_DEV2
 		if *delete {
 			os.Remove(tmfsync.DEV2_dbname)
-			os.Remove("./tmf-dev2.db-shm")
-			os.Remove("./tmf-dev2.db-wal")
+			os.Remove(tmfsync.DEV2_dbname + "-shm")
+			os.Remove(tmfsync.DEV2_dbname + "-wal")
 		}
 	}
 
@@ -72,15 +73,51 @@ func main() {
 	}
 
 	// Retrieve the product offerings
-	_, err = tmf.CloneRemoteProductOfferings()
+	_, visitedObjects, err := tmf.CloneRemoteProductOfferings()
 	if err != nil {
 		panic(err)
 	}
 
+	// Write some stats
+	fmt.Println("############################################")
+
+	var differentTypes = make(map[string]bool)
+
+	fmt.Println("Visited objects:")
+	for id := range visitedObjects {
+		parts := strings.Split(id, ":")
+		differentTypes[parts[2]] = true
+		fmt.Println(id)
+	}
+	fmt.Println("############################################")
+
+	fmt.Println("Different types:")
+	for t := range differentTypes {
+		fmt.Println(t)
+	}
+
 	// Retrieve the product offerings
-	_, err = tmf.CloneRemoteCatalogues()
+	_, visitedObjects, err = tmf.CloneRemoteCatalogues()
 	if err != nil {
 		panic(err)
+	}
+
+	// Write some stats
+	fmt.Println("############################################")
+
+	differentTypes = make(map[string]bool)
+
+	fmt.Println("Visited objects:")
+	for id := range visitedObjects {
+		parts := strings.Split(id, ":")
+		differentTypes[parts[2]] = true
+		fmt.Println(id)
+	}
+	fmt.Println("############################################")
+
+	fmt.Println("Different types:")
+	for t := range differentTypes {
+		fmt.Println(t)
 	}
 
 	fmt.Println("Refreshed objects", tmf.RefreshCounter)

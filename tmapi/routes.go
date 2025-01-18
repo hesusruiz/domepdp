@@ -1,10 +1,12 @@
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
+
 package tmapi
 
 import (
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/goccy/go-json"
 
@@ -14,16 +16,6 @@ import (
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )
-
-// tokenFromHeader retrieves the token string in the authorization header of an HTTP request
-func tokenFromHeader(r *http.Request) string {
-	// Get token from authorization header.
-	bearer := r.Header.Get("Authorization")
-	if len(bearer) > 7 && strings.ToUpper(bearer[0:6]) == "BEARER" {
-		return bearer[7:]
-	}
-	return ""
-}
 
 func addHttpRoutes(
 	environment constants.Environment,
@@ -48,37 +40,57 @@ func addHttpRoutes(
 	}
 
 	// Many routes share the same handlers, thanks to the consistency of the TMF APIs and underlying data model.
-	// We have one for all LIST requests (get several objects), and another for GET requests (get one object)
-	mux.HandleFunc("GET /catalog/category", handleGETlist("category", tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/productOffering", handleGETlist("productOffering", tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/catalog", handleGETlist("catalog", tmf, ruleEngine))
+	// We have one for all LIST requests (get several objects), and another for GET requests (get one object).
 
+	// The LISTING handlers for Category, Catalog and ProductOffering
+	mux.HandleFunc("GET /catalog/category", handleGETlist("category", logger, tmf, ruleEngine))
+	mux.HandleFunc("GET /catalog/productOffering", handleGETlist("productOffering", logger, tmf, ruleEngine))
+	mux.HandleFunc("GET /catalog/catalog", handleGETlist("catalog", logger, tmf, ruleEngine))
+
+	// The GET one object handlers for all objects of interest
 	mux.HandleFunc("GET /catalog/category/{id}", handleGET("category", logger, tmf, ruleEngine))
 	mux.HandleFunc("GET /catalog/productOffering/{id}", handleGET("productOffering", logger, tmf, ruleEngine))
 	mux.HandleFunc("GET /catalog/productSpecification/{id}", handleGET("productSpecification", logger, tmf, ruleEngine))
 	mux.HandleFunc("GET /catalog/productOfferingPrice/{id}", handleGET("productOfferingPrice", logger, tmf, ruleEngine))
-
 	mux.HandleFunc("GET /service/serviceSpecification/{id}", handleGET("serviceSpecification", logger, tmf, ruleEngine))
 	mux.HandleFunc("GET /resource/resourceSpecification/{id}", handleGET("resourceSpecification", logger, tmf, ruleEngine))
-
 	mux.HandleFunc("GET /party/organization/{id}", handleGET("organization", logger, tmf, ruleEngine))
 
-	mux.HandleFunc("GET /authorize/v1/policies/httpapi/authz", handleGETAuthorization(logger, tmf, ruleEngine))
+	// The POST handlers
+	mux.HandleFunc("POST /catalog/category", handlePOST("category", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /catalog/productOffering", handlePOST("productOffering", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /catalog/productSpecification", handlePOST("productSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /catalog/productOfferingPrice", handlePOST("productOfferingPrice", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /service/serviceSpecification", handlePOST("serviceSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /resource/resourceSpecification", handlePOST("resourceSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /party/organization", handlePOST("organization", logger, tmf, ruleEngine))
+
+	// The PATCH handlers
+	mux.HandleFunc("PATCH /catalog/category/{id}", handlePATCH("category", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /catalog/productOffering/{id}", handlePATCH("productOffering", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /catalog/productSpecification/{id}", handlePATCH("productSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /catalog/productOfferingPrice/{id}", handlePATCH("productOfferingPrice", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /service/serviceSpecification/{id}", handlePATCH("serviceSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /resource/resourceSpecification/{id}", handlePATCH("resourceSpecification", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /party/organization/{id}", handlePATCH("organization", logger, tmf, ruleEngine))
+
+	// The AUTH handler for acting as a pure PDP
+	mux.HandleFunc("GET /authorize/v1/policies/authz", pdp.HandleGETAuthorization(logger, tmf, ruleEngine))
 
 }
 
 // handleGETlist retrieves a list of objects, subject to filtering
-func handleGETlist(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handleGETlist(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		// For the moment, a LIST request does not go through authorization, and are fully public
+		// For the moment, a LIST request does not go through authorization, and is fully public
 		_ = ruleEngine
 
-		slog.Info("GET LIST", "type", tmfType)
+		logger.Info("GET LIST", "type", tmfType)
 		tmfObjectList, err := retrieveList(tmf, tmfType, r)
 		if err != nil {
 			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
-			slog.Error("retrieving", slogor.Err(err))
+			logger.Error("retrieving", slogor.Err(err))
 			return
 		}
 
@@ -90,7 +102,7 @@ func handleGETlist(tmfType string, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func
 		out, err := json.Marshal(listMaps)
 		if err != nil {
 			errorTMF(w, http.StatusInternalServerError, "error marshalling list", err.Error())
-			slog.Error("error marshalling list", slogor.Err(err))
+			logger.Error("error marshalling list", slogor.Err(err))
 			return
 		}
 
@@ -105,180 +117,62 @@ func handleGET(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngi
 
 		logger.Info("GET", "type", tmfType, slog.Any("request", r))
 
-		// Retrieve the Access Token from the request, if it exists.
-		// We do not enforce here its existence or validity, and delegate enforcement (or not) to the policies in the rule engine
-		tokString := tokenFromHeader(r)
+		// Set the proper fields in the request
+		r.Header.Set("X-Original-URI", r.URL.RequestURI())
+		r.Header.Set("X-Original-Method", "GET")
 
-		// Just some logs
-		if tokString == "" {
-			slog.Warn("no token found")
-		} else {
-			slog.Debug("Access Token found")
-		}
-
-		// Retrieve the object, either from our local database or remotely if it does not yet exist.
-		// We need this so the rule engine can evaluate the policies using the data from the object.
-		tmfObject, err := retrieveObject(tmf, tmfType, r)
+		tmfObject, err := pdp.HandleREADAuth(logger, tmf, ruleEngine, r)
 		if err != nil {
 			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
 			slog.Error("retrieving", slogor.Err(err))
 			return
 		}
 
-		// Ask the rules engine for a decision on this request
-		decision, err := ruleEngine.TakeAuthnDecisionOPAStyle(pdp.Authorize, r, tokString, tmfObject)
+		replyTMF(w, tmfObject.Content)
 
-		// An error is considered a rejection
+	}
+}
+
+func handlePOST(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		logger.Info("POST", "type", tmfType, slog.Any("request", r))
+
+		// Set the proper fields in the request
+		r.Header.Set("X-Original-URI", r.URL.RequestURI())
+		r.Header.Set("X-Original-Method", "GET")
+
+		tmfObject, err := pdp.HandleCREATEAuth(logger, tmf, ruleEngine, r)
 		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error taking decision", err.Error())
-			slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
+			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
+			slog.Error("retrieving", slogor.Err(err))
 			return
 		}
-
-		// The rules engine rejected the request
-		if !decision {
-			errorTMF(w, http.StatusUnauthorized, "not authenticated", "the policies said NOT!!!")
-			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
-			return
-		}
-
-		// The rules engine accepted the request, return it to the caller
-		slog.Info("Authorized Authorized")
 
 		replyTMF(w, tmfObject.Content)
 
 	}
 }
 
-// handleGET retrieves a single TMF object, subject to authorization policy rules
-func handleGETAuthorization(logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handlePATCH(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		logger.Info("GETAuthorization", slog.Any("request", r))
+		logger.Info("PATCH", "type", tmfType, slog.Any("request", r))
 
-		// Get the ininitial Request values from the header. These are the ones we use, with notation from NGINX
-		// X-Original-URI $request_uri;
-		// X-Original-Method $request_method
-		// X-Original-Remote-Addr $remote_addr;
-		// X-Original-Host $host;
+		// Set the proper fields in the request
+		r.Header.Set("X-Original-URI", r.URL.RequestURI())
+		r.Header.Set("X-Original-Method", "PATCH")
 
-		request_uri := r.Header.Get("X-Original-URI")
-
-		// X-Original-URI is compulsory
-		if len(request_uri) == 0 {
-			http.Error(w, "X-Original-URI missing", http.StatusUnauthorized)
-			return
-		}
-
-		reqURL, err := url.ParseRequestURI(request_uri)
+		tmfObject, err := pdp.HandleUPDATEAuth(logger, tmf, ruleEngine, r)
 		if err != nil {
-			http.Error(w, "X-Original-URI invalid: "+err.Error(), http.StatusUnauthorized)
+			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
+			slog.Error("retrieving", slogor.Err(err))
 			return
 		}
 
-		// Get the type of object to retrieve from the request URI.
-		// This is specialized for TMForum APIs in DOME
-		stripped := strings.Trim(request_uri, "/")
-		request_uri_parts := strings.Split(stripped, "/")
-		if len(request_uri_parts) < 3 {
-			http.Error(w, "X-Original-URI invalid", http.StatusUnauthorized)
-			return
+		replyTMF(w, tmfObject.Content)
 
-		}
-
-		tmfType := request_uri_parts[1]
-
-		// Set the original fields in the Request object before passing it to the rules engine
-		r.RequestURI = request_uri
-		r.URL = reqURL
-
-		// And the rest of fields
-		r.Method = r.Header.Get("X-Original-Method")
-		r.Host = r.Header.Get("X-Original-Host")
-
-		if r.Header.Get("X-Original-Remote-Addr") != "" {
-			r.RemoteAddr = r.Header.Get("X-Original-Remote-Addr")
-		}
-
-		// Retrieve the Access Token from the request, if it exists.
-		// We do not enforce here its existence or validity, and delegate enforcement (or not) to the policies in the rule engine
-		tokString := tokenFromHeader(r)
-
-		// Just some logs
-		if tokString == "" {
-			slog.Warn("no token found")
-		} else {
-			slog.Debug("Access Token found")
-		}
-
-		var tmfObject *tmfsync.TMFObject
-		if r.Method == "GET" {
-			// Retrieve the object, either from our local database or remotely if it does not yet exist.
-			// We need this so the rule engine can evaluate the policies using the data from the object.
-			id := request_uri_parts[2]
-
-			slog.Debug("retrieving", "type", tmfType, "id", id)
-
-			// Retrieve the product offerings
-			var local bool
-			tmfObject, local, err = tmf.RetrieveOrUpdateObject(nil, id, "", "", tmfsync.LocalOrRemote)
-			if err != nil {
-				slog.Error("retrieving", slogor.Err(err))
-				http.Error(w, "not authorized", http.StatusUnauthorized)
-				return
-			}
-			if local {
-				slog.Debug("object retrieved locally")
-			} else {
-				slog.Debug("object retrieved remotely")
-			}
-		}
-
-		// Ask the rules engine for a decision on this request
-		decision, err := ruleEngine.TakeAuthnDecisionOPAStyle(pdp.Authorize, r, tokString, tmfObject)
-
-		// An error is considered a rejection
-		if err != nil {
-			slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
-			http.Error(w, "not authorized", http.StatusUnauthorized)
-			return
-		}
-
-		// The rules engine rejected the request
-		if !decision {
-			errorTMF(w, http.StatusUnauthorized, "not authenticated", "the policies said NOT!!!")
-			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
-			http.Error(w, "not authorized", http.StatusUnauthorized)
-			return
-		}
-
-		// The rules engine accepted the request, return it to the caller
-		slog.Info("Authorized Authorized")
-
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
 	}
-}
-
-func retrieveObject(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) (*tmfsync.TMFObject, error) {
-
-	id := r.PathValue("id")
-
-	slog.Debug("retrieving", "type", tmfType, "id", id)
-
-	// Retrieve the product offerings
-	object, local, err := tmf.RetrieveOrUpdateObject(nil, id, "", "", tmfsync.LocalOrRemote)
-	if err != nil {
-		return nil, err
-	}
-	if local {
-		slog.Debug("object retrieved locally")
-	} else {
-		slog.Debug("object retrieved remotely")
-	}
-
-	return object, nil
-
 }
 
 func retrieveList(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) ([]*tmfsync.TMFObject, error) {

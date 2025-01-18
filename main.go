@@ -1,14 +1,7 @@
-// Implements a tunneling forward proxy for CONNECT requests, while also
-// MITM-ing the connection and dumping the HTTPs requests/responses that cross
-// the tunnel.
-//
-// Requires a certificate/key for a CA trusted by clients in order to generate
-// and sign fake TLS certificates.
-//
-// Eli Bendersky [https://eli.thegreenplace.net]
-// This code is in the public domain.
-//
-// (JRM) Replace panics for error handling, to avoid the proxy server exiting.
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
+
 package main
 
 import (
@@ -52,6 +45,7 @@ func main() {
 
 	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(logLevel), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
 
+	// Start a debug server on a random port, enabling control of log level.
 	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
 		logLevel.Set(slog.LevelDebug)
 		w.WriteHeader(http.StatusOK)
@@ -83,7 +77,7 @@ func main() {
 	var gr run.Group
 
 	// Configure the PDP server to receive/authorize intercepted requests
-	tmfConfig, execute, interrupt, err := tmapi.HttpServerHandler(environment, *pdpAddress, *debug)
+	tmfConfig, execute, interrupt, err := tmapi.TMFServerHandler(environment, *pdpAddress, *debug)
 	if err != nil {
 		panic(err)
 	}

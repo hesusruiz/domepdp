@@ -131,7 +131,7 @@ func NewPDP(environment constants.Environment,
 	// Retrieve the key at initialization time, to discover any possible
 	// error in environment configuration as early as possible (eg, the Verifier is not running).
 	var err error
-	m.verifierJWK, err = verificationKeyFunc(environment)
+	m.verifierJWK, err = m.verificationKeyFun(environment)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func NewPDP(environment constants.Environment,
 
 // defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
 //
-// It receives the runtime environment, enabilng a different mechanism depending on it.
+// It receives the runtime environment, enabling a different mechanism depending on it.
 func defaultVerificationKey(environment constants.Environment) (*jose.JSONWebKey, error) {
 
 	// Retrieve the OpenID configuration from the Verifier
@@ -211,7 +211,8 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 		Name: "exec " + scriptname,
 	}
 
-	// Create a predeclared environment specific for this module (empty for the moment)
+	// Create a predeclared environment holding the 'input' object.
+	// For the moment it is empty, but it will be mutated for each request for authentication.
 	te.predeclared = st.StringDict{}
 	te.predeclared["input"] = StarTMFMap{}
 
@@ -501,7 +502,7 @@ func (m *PDP) TakeAuthnDecisionOPAStyle(decision Decision, r *http.Request, tokS
 
 }
 
-func (m *PDP) TakeAuthnDecision(decision Decision, requestArgument StarTMFMap, tokenArgument StarTMFMap, tmfArgument StarTMFMap) (bool, error) {
+func (m *PDP) TakeAuthnDecision(decision Decision, input StarTMFMap) (bool, error) {
 	var err error
 
 	// Get a Starlark Thread from the pool to evaluate the policies.
@@ -516,21 +517,9 @@ func (m *PDP) TakeAuthnDecision(decision Decision, requestArgument StarTMFMap, t
 		return false, fmt.Errorf("getting a thread entry from pool")
 	}
 
-	// Assemble all data in a single "input" argument, to the style of OPA
-	// inputNative := map[string]any{
-	// 	"request": requestArgument,
-	// 	"token":   tokenArgument,
-	// 	"tmf":     tmfArgument,
-	// }
-	// input := StarTMFMap(inputNative)
-
-	// Assemble all data in a single "input" argument, to the style of OPA.
 	// We mutate the predeclared identifier, so the policy can access the data for this request.
 	// We can also service possible callbacks from the rules engine.
-	uniMap := te.predeclared["input"].(StarTMFMap)
-	uniMap["request"] = requestArgument
-	uniMap["token"] = tokenArgument
-	uniMap["tmf"] = tmfArgument
+	te.predeclared["input"] = input
 
 	// Build the arguments to the StarLark function, which is empty.
 	var args st.Tuple
@@ -745,8 +734,13 @@ func (s StarTMFMap) Get(name st.Value) (v st.Value, found bool, err error) {
 
 	path := string(name.(st.String))
 
-	// Quick short-circuit
-	if path == "" || path == "." {
+	// We need at least one name
+	if path == "" {
+		return s, false, nil
+	}
+
+	// This is a special case, where we assume the meaning of "this object".
+	if path == "." {
 		return s, true, nil
 	}
 
@@ -932,7 +926,7 @@ func softHashString(s string) uint32 {
 
 // getClaimsFromRequest verifies the Access Token received with the request, and extracts the claims in its payload.
 // The most important claim in the payload is the LEARCredential that was used for authentication.
-func (m *PDP) getClaimsFromToken(tokString string) (nativeMapClaims map[string]any, found bool, err error) {
+func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found bool, err error) {
 	var token *jwt.Token
 	var theClaims = MapClaims{}
 

@@ -48,6 +48,7 @@ func TestPDP_TakeAuthnDecision(t *testing.T) {
 		requestArgument StarTMFMap
 		tokenArgument   StarTMFMap
 		tmfArgument     StarTMFMap
+		userArgument    StarTMFMap
 		readFileFun     func(name string) ([]byte, bool, error)
 	}
 	tests := []struct {
@@ -95,7 +96,14 @@ def authorize():
 				panic(err)
 			}
 
-			got, err := m.TakeAuthnDecision(tt.args.decision, tt.args.requestArgument, tt.args.tokenArgument, tt.args.tmfArgument)
+			input := StarTMFMap{
+				"request": tt.args.requestArgument,
+				"token":   tt.args.tokenArgument,
+				"tmf":     tt.args.tmfArgument,
+				"user":    tt.args.userArgument,
+			}
+
+			got, err := m.TakeAuthnDecision(tt.args.decision, input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("PDP.TakeAuthnDecision() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -134,23 +142,11 @@ func BenchmarkAuthDecision(b *testing.B) {
 	}
 	defer tmf.Close()
 
-	readFileFun := func(name string) ([]byte, bool, error) {
-		return []byte(`
-def authorize():
-    a = input.request
-    b = input.request.path
-    c = input.request.path[1]
-    if c == "segundo":
-        return True
-
-    return True     `), true, nil
-	}
-
 	m, err := NewPDP(
 		constants.DOME_PRO,
-		"test1",
+		"auth_policies.star",
 		false,
-		readFileFun,
+		nil,
 		verificationKeyFunc,
 	)
 	if err != nil {
@@ -167,8 +163,19 @@ def authorize():
 		}
 		tokenArgument := StarTMFMap{}
 		tmfArgument := StarTMFMap{}
+		userArgument := StarTMFMap{
+			"isLEAR":  true,
+			"country": "ES",
+		}
 
-		m.TakeAuthnDecision(Authorize, requestArgument, tokenArgument, tmfArgument)
+		input := StarTMFMap{
+			"request": requestArgument,
+			"token":   tokenArgument,
+			"tmf":     tmfArgument,
+			"user":    userArgument,
+		}
+
+		m.TakeAuthnDecision(Authorize, input)
 	}
 
 }

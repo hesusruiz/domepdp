@@ -1,3 +1,7 @@
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
+
 package tmfsync
 
 import (
@@ -9,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -127,6 +132,7 @@ type TMFdb struct {
 	Maxfreshness   int
 	RefreshCounter int
 	Dump           bool
+	cloneMutex     sync.Mutex
 }
 
 func New(config *Config) (*TMFdb, error) {
@@ -173,6 +179,10 @@ func createTables(dbpool *sqlitex.Pool) error {
 	return nil
 }
 
+func (tmf *TMFdb) Server() string {
+	return tmf.domeServer
+}
+
 func (tmf *TMFdb) RequestDB(dbconn *sqlite.Conn) (*sqlite.Conn, error) {
 	if dbconn != nil {
 		return dbconn, nil
@@ -198,132 +208,84 @@ func indentStr(indent int) string {
 	return strings.Repeat(" ", indent)
 }
 
-var visitedObjects map[string]bool
-
 // CloneRemoteProductOfferings visits the remote tree of objects starting from the lists of product offerings.
 //
 // This function is special in the sense that it retrieves a list of complete objects without their dependencies
-func (tmf *TMFdb) CloneRemoteProductOfferings() ([]*TMFObject, error) {
+func (tmf *TMFdb) CloneRemoteProductOfferings() ([]*TMFObject, map[string]bool, error) {
+	tmf.cloneMutex.Lock()
+	defer tmf.cloneMutex.Unlock()
 
-	visitedObjects = make(map[string]bool)
+	visitedObjects := make(map[string]bool)
 
-	// Get the list of product offerings from the DOME server
-	res, err := http.Get(tmf.domeServer + "/catalog/productOffering?limit=500&offset=0&lifecycleStatus=Launched")
-	if err != nil {
-		slog.Error(err.Error())
-		return nil, err
-	}
-	body, err := io.ReadAll(res.Body)
-	res.Body.Close()
-	if res.StatusCode > 299 {
-		slog.Error("Response failed", "status", res.StatusCode, "body", body)
-		return nil, err
-	}
-	if err != nil {
-		slog.Error("reading response body", slogor.Err(err))
-		return nil, err
-	}
+	// We will retrieve the objects in chunks of 100, looping until we get a reply with no objects
+	limit := 10
+	offset := 0
 
-	// Parse the JSON response
-	var poListMap []map[string]any
-	err = json.Unmarshal(body, &poListMap)
-	if err != nil {
-		slog.Error("parsing JSOn response", slogor.Err(err))
-		return nil, err
-	}
+	// We are only interested in ProductOfferings which are launched to the market (lifecycleStatus=Launched)
+	lifecycleStatus := "Launched"
 
-	indent := 0
-
-	// Process the list of product offerings
 	var productOfferings []*TMFObject
-	for i, oMap := range poListMap {
 
-		po, err := tmf.CloneRemoteProductOffering(oMap, indent)
+	for {
+
+		// Get the list of product offerings from the DOME server
+		url := fmt.Sprintf("%s/catalog/productOffering?limit=%d&offset=%d&lifecycleStatus=%s", tmf.domeServer, limit, offset, lifecycleStatus)
+		res, err := http.Get(url)
 		if err != nil {
-			slog.Error("cloning PO", slogor.Err(err))
-			continue
+			slog.Error(err.Error())
+			return nil, nil, err
+		}
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode > 299 {
+			slog.Error("Response failed", "status", res.StatusCode, "body", body)
+			return nil, nil, err
+		}
+		if err != nil {
+			slog.Error("reading response body", slogor.Err(err))
+			return nil, nil, err
 		}
 
-		fmt.Printf("Product Offering (%d):\n", i)
+		// Parse the JSON response
+		var poListAsMap []map[string]any
+		err = json.Unmarshal(body, &poListAsMap)
+		if err != nil {
+			slog.Error("parsing JSON response", slogor.Err(err))
+			return nil, nil, err
+		}
 
-		// po, err := NewTMFObject(oMap, nil)
-		// if err != nil {
-		// 	slog.Error("creating NewTMFObject", slogor.Err(err))
-		// 	continue
-		// }
+		// Check if we should termninate the loop because there are no more objects
+		if len(poListAsMap) == 0 {
+			break
+		}
 
-		// owner, err := tmf.GetProductOfferingOwner(oMap)
-		// if err != nil {
-		// 	slog.Error(err.Error())
-		// } else {
-		// 	po.OrganizationIdentifier = owner.OrganizationIdentifier
-		// 	oMap["organizationIdentifier"] = owner.OrganizationIdentifier
-		// 	po.Organization = owner.Organization
-		// 	oMap["organization"] = owner.Organization
-		// 	po.ContentMap = oMap
-		// }
+		indent := 0
 
-		productOfferings = append(productOfferings, po)
+		// Process the list of product offerings
+		for _, oMap := range poListAsMap {
 
-		// // Save the object in the local database
-		// dbconn, err := tmf.dbpool.Take(context.Background())
-		// if err != nil {
-		// 	slog.Error("getting dbconn", slogor.Err(err))
-		// 	continue
-		// }
-		// defer func() {
-		// 	tmf.dbpool.Put(dbconn)
+			po, err := tmf.CloneRemoteProductOffering(oMap, indent, visitedObjects)
+			if err != nil {
+				slog.Error("cloning PO", slogor.Err(err))
+				continue
+			}
 
-		// }()
+			productOfferings = append(productOfferings, po)
 
-		// // Encapsulate work in an SQLite Savepoint
-		// doWork := func(conn *sqlite.Conn) (err error) {
-		// 	defer sqlitex.Save(conn)(&err)
+		}
 
-		// 	if err := tmf.UpsertTMFObject(conn, po); err != nil {
-		// 		slog.Error(err.Error())
-		// 		return err
-		// 	}
-
-		// 	return nil
-		// }
-		// err = doWork(dbconn)
-		// if err != nil {
-		// 	slog.Error(err.Error())
-		// }
-
-		// visitedObjects[po.ID] = true
-
-		// fmt.Printf("Product Offering (%d):\n", i)
-
-		// tmf.visitObjectMap(oMap, po.OrganizationIdentifier, po.Organization, indent+3)
+		// Go and retrieve the next chunk of objects
+		offset = offset + limit
 
 	}
 
-	// Write some stats
-	fmt.Println("############################################")
-
-	var differentTypes = make(map[string]bool)
-
-	fmt.Println("Visited objects:")
-	for id := range visitedObjects {
-		parts := strings.Split(id, ":")
-		differentTypes[parts[2]] = true
-		fmt.Println(id)
-	}
-	fmt.Println("############################################")
-
-	fmt.Println("Different types:")
-	for t := range differentTypes {
-		fmt.Println(t)
-	}
-
-	return productOfferings, nil
+	return productOfferings, visitedObjects, nil
 
 }
 
-func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*TMFObject, error) {
+func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int, visitedObjects map[string]bool) (*TMFObject, error) {
 
+	// Wrap all db operations in a SQLite Savepoint (which is a nestable transaction)
 	doWork := func() (po *TMFObject, err error) {
 
 		dbconn, err := tmf.dbpool.Take(context.Background())
@@ -334,6 +296,7 @@ func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*
 			tmf.dbpool.Put(dbconn)
 		}()
 
+		// Start the Savepoint and defer its Commint/Rollback
 		release := sqlitex.Save(dbconn)
 		defer func() {
 			release(&err)
@@ -345,10 +308,18 @@ func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*
 			return nil, err
 		}
 
+		// At this moment, the ProductOffering object in DOME does not have
+		// the identification of the owner organization.
+		// We need that info to enable access control at the object level, so we retrieve
+		// the owner information indirectly by retrieving the ProductSpecification associated
+		// to the ProductOffering, and getting the relevant information from the RelatedParty
+		// object associated to the ProductSpecification.
 		owner, err := tmf.GetProductOfferingOwner(dbconn, oMap)
 		if err != nil {
+			// We do not stop processing in case of error, just log it.
 			slog.Error(err.Error())
 		} else {
+			// Update our ProductOffering with the owner information retrieved
 			po.OrganizationIdentifier = owner.OrganizationIdentifier
 			oMap["organizationIdentifier"] = owner.OrganizationIdentifier
 			po.Organization = owner.Organization
@@ -356,6 +327,7 @@ func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*
 			po.ContentMap = oMap
 		}
 
+		// Update or Insert the ProductOffering in our database
 		if err := tmf.UpsertTMFObject(dbconn, po); err != nil {
 			slog.Error(err.Error())
 			return nil, err
@@ -363,11 +335,14 @@ func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*
 
 		visitedObjects[po.ID] = true
 
-		tmf.visitObjectMap(dbconn, oMap, po.OrganizationIdentifier, po.Organization, indent+3)
+		// Recursively retrieve and save the sub-objects of this ProductOffering.
+		// We pass the owner information so those objects can include it with them.
+		tmf.visitMap(dbconn, oMap, po.OrganizationIdentifier, po.Organization, indent+3, visitedObjects)
 
 		return po, nil
 	}
 
+	// This actually executes the Savepoint
 	po, err := doWork()
 	if err != nil {
 		slog.Error(err.Error())
@@ -378,130 +353,137 @@ func (tmf *TMFdb) CloneRemoteProductOffering(oMap map[string]any, indent int) (*
 
 }
 
-func (tmf *TMFdb) CloneRemoteCatalogues() ([]*TMFObject, error) {
+func (tmf *TMFdb) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error) {
+	tmf.cloneMutex.Lock()
+	defer tmf.cloneMutex.Unlock()
 
-	visitedObjects = make(map[string]bool)
+	visitedObjects := make(map[string]bool)
 
-	// Get the list of catalogues from the DOME server
-	res, err := http.Get(tmf.domeServer + "/catalog/catalog?limit=500&offset=0&lifecycleStatus=Launched,Active")
-	if err != nil {
-		slog.Error(err.Error())
-		return nil, err
-	}
-	body, err := io.ReadAll(res.Body)
-	res.Body.Close()
-	if res.StatusCode > 299 {
-		slog.Error("Response failed", "status", res.StatusCode, "body", body)
-		return nil, err
-	}
-	if err != nil {
-		slog.Error("reading response body", slogor.Err(err))
-		return nil, err
-	}
+	// We will retrieve the objects in chunks of 100, looping until we get a reply with no objects
+	limit := 10
+	offset := 0
 
-	// Parse the JSON response
-	var poListMap []map[string]any
-	err = json.Unmarshal(body, &poListMap)
-	if err != nil {
-		slog.Error("parsing JSOn response", slogor.Err(err))
-		return nil, err
-	}
+	// We are only interested in ProductOfferings which are launched or active
+	// to the market (lifecycleStatus=Launched,Active)
+	lifecycleStatus := "Launched,Active"
 
-	// Process the list
 	var poList []*TMFObject
-	for _, oMap := range poListMap {
 
-		po, err := NewTMFObject(oMap, nil)
+	for {
+
+		// Get the list of catalogues from the DOME server
+		url := fmt.Sprintf("%s/catalog/catalog?limit=%d&offset=%d&lifecycleStatus=%s", tmf.domeServer, limit, offset, lifecycleStatus)
+		res, err := http.Get(url)
 		if err != nil {
-			slog.Error("creating NewTMFObject", slogor.Err(err))
-			continue
+			slog.Error(err.Error())
+			return nil, nil, err
+		}
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode > 299 {
+			slog.Error("Response failed", "status", res.StatusCode, "body", body)
+			return nil, nil, err
+		}
+		if err != nil {
+			slog.Error("reading response body", slogor.Err(err))
+			return nil, nil, err
 		}
 
-		// There must be a relatedParty object
-		relatedPartyList, ok := po.ContentMap["relatedParty"].([]any)
-		if !ok {
-			slog.Error("invalid relatedParty object")
-			out, _ := json.MarshalIndent(oMap, "", "   ")
-			fmt.Println(string(out))
-			continue
+		// Parse the JSON response
+		var poListMap []map[string]any
+		err = json.Unmarshal(body, &poListMap)
+		if err != nil {
+			slog.Error("parsing JSOn response", slogor.Err(err))
+			return nil, nil, err
 		}
 
-		if relatedPartyList == nil {
-			slog.Error("relatedParty is nil")
-			return nil, fmt.Errorf("relatedParty is nil")
+		// Check if we should termninate the loop because there are no more objects
+		if len(poListMap) == 0 {
+			break
 		}
 
-		// One of the relatedParty items must be the one defining the owner
-		for _, rp := range relatedPartyList {
-			rpMap := rp.(map[string]any)
-			if strings.ToLower(rpMap["role"].(string)) == "owner" {
-				owner, _, err := tmf.RetrieveOrUpdateObject(nil, rpMap["href"].(string), "", "", LocalOrRemote)
-				if err != nil {
-					slog.Error(err.Error())
-					return nil, err
-				}
+		// Process the list
+		for _, oMap := range poListMap {
 
-				// The array externalReference contains the ID of the organization
-				ownerReference := owner.ContentMap["externalReference"].([]any)
-				if ownerReference == nil {
-					slog.Info("externalReference is nil")
-					return nil, fmt.Errorf("externalReference is nil")
-				}
-
-				for _, extRef := range ownerReference {
-					extRefMap := extRef.(map[string]any)
-					if extRefMap["externalReferenceType"] == "idm_id" {
-						oid := extRefMap["name"].(string)
-						organization := owner.ID
-
-						// Now that we have the owner, update the local database for the productSpecification object
-						if len(owner.OrganizationIdentifier) == 0 {
-							owner, _ = owner.UpdateInMemoryWithOwner(oid, organization)
-							err := tmf.UpsertTMFObject(nil, owner)
-							if err != nil {
-								slog.Error(err.Error())
-								return nil, err
-							}
-						}
-						if len(po.OrganizationIdentifier) == 0 {
-							po, _ = po.UpdateInMemoryWithOwner(oid, organization)
-							err := tmf.UpsertTMFObject(nil, po)
-							if err != nil {
-								slog.Error(err.Error())
-								return nil, err
-							}
-						}
-
-						break
-					}
-				}
-
+			po, err := NewTMFObject(oMap, nil)
+			if err != nil {
+				slog.Error("creating NewTMFObject", slogor.Err(err))
+				continue
 			}
+
+			// There must be a relatedParty object
+			relatedPartyList, ok := po.ContentMap["relatedParty"].([]any)
+			if !ok {
+				slog.Error("invalid relatedParty object")
+				out, _ := json.MarshalIndent(oMap, "", "   ")
+				fmt.Println(string(out))
+				continue
+			}
+
+			if relatedPartyList == nil {
+				slog.Error("relatedParty is nil")
+				return nil, nil, fmt.Errorf("relatedParty is nil")
+			}
+
+			// One of the relatedParty items must be the one defining the owner
+			for _, rp := range relatedPartyList {
+				rpMap := rp.(map[string]any)
+				if strings.ToLower(rpMap["role"].(string)) == "owner" {
+					owner, _, err := tmf.RetrieveOrUpdateObject(nil, rpMap["href"].(string), "", "", LocalOrRemote)
+					if err != nil {
+						slog.Error(err.Error())
+						return nil, nil, err
+					}
+
+					// The array 'externalReference' contains the ID of the organization
+					ownerReference := owner.ContentMap["externalReference"].([]any)
+					if ownerReference == nil {
+						slog.Info("externalReference is nil")
+						return nil, nil, fmt.Errorf("externalReference is nil")
+					}
+
+					for _, extRef := range ownerReference {
+						extRefMap := extRef.(map[string]any)
+						if extRefMap["externalReferenceType"] == "idm_id" {
+							oid := extRefMap["name"].(string)
+							organization := owner.ID
+
+							// Now that we have the owner, update the local database for the productSpecification object
+							if len(owner.OrganizationIdentifier) == 0 {
+								owner, _ = owner.UpdateInMemoryWithOwner(oid, organization)
+								err := tmf.UpsertTMFObject(nil, owner)
+								if err != nil {
+									slog.Error(err.Error())
+									return nil, nil, err
+								}
+							}
+							if len(po.OrganizationIdentifier) == 0 {
+								po, _ = po.UpdateInMemoryWithOwner(oid, organization)
+								err := tmf.UpsertTMFObject(nil, po)
+								if err != nil {
+									slog.Error(err.Error())
+									return nil, nil, err
+								}
+							}
+
+							poList = append(poList, po)
+							break
+						}
+					}
+
+				}
+			}
+
+			visitedObjects[po.ID] = true
+
 		}
 
-		visitedObjects[po.ID] = true
+		// Go and retrieve the next chunk of objects
+		offset = offset + limit
 
 	}
 
-	// Write some stats
-	fmt.Println("############################################")
-
-	var differentTypes = make(map[string]bool)
-
-	fmt.Println("Visited objects:")
-	for id := range visitedObjects {
-		parts := strings.Split(id, ":")
-		differentTypes[parts[2]] = true
-		fmt.Println(id)
-	}
-	fmt.Println("############################################")
-
-	fmt.Println("Different types:")
-	for t := range differentTypes {
-		fmt.Println(t)
-	}
-
-	return poList, nil
+	return poList, visitedObjects, nil
 
 }
 
@@ -653,6 +635,7 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
 	// There was no record with the same id and version, so insert the full object
 	err = tmf.InsertInStorage(dbconn, po)
 	if err != nil {
+		slog.Error("UpsertTMFObject", "href", po.ID, "version", po.Version, "error", err)
 		return err
 	}
 
@@ -753,10 +736,10 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 	return remotepo, false, nil
 }
 
-func (tmf *TMFdb) visitObjectMap(dbconn *sqlite.Conn, currentObject map[string]any, oid string, organization string, indent int) {
+func (tmf *TMFdb) visitMap(dbconn *sqlite.Conn, currentObject map[string]any, oid string, organization string, indent int, visitedObjects map[string]bool) {
 
-	// A map object can contain a href field that points to another object
-	// In this case we retrieve the object and visit the retrieved object, if it was not retrieved before
+	// A map object can contain a 'href' field that points to another object.
+	// In this case we retrieve and visit the object, if it was not retrieved before.
 	// For other map objects we print the relevant fields
 	if currentObject["href"] != nil {
 		href := currentObject["href"].(string)
@@ -769,100 +752,167 @@ func (tmf *TMFdb) visitObjectMap(dbconn *sqlite.Conn, currentObject map[string]a
 			if err != nil {
 				slog.Error(err.Error())
 			} else {
-				tmf.visitObjectMap(dbconn, remoteObj.ContentMap, oid, organization, indent+3)
+				tmf.visitMap(dbconn, remoteObj.ContentMap, oid, organization, indent+3, visitedObjects)
 			}
 		}
 	}
 
 	for k, v := range currentObject {
 		switch v := v.(type) {
-		case string:
-			switch k {
-			case "href":
-				// Skip the href field
-				continue
-			case "startDateTime", "lifecycleStatus", "version", "lastUpdate", "created", "updated", "id", "externalReference":
-				if tmf.Dump {
-					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-				}
-			case "role":
-				if tmf.Dump {
-					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-				}
-			default:
-				if tmf.Dump {
-					fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
-				}
-			}
 
-		case float64:
-			if tmf.Dump {
-				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-			}
-		case bool:
-			if tmf.Dump {
-				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-			}
 		case map[string]any:
 			if tmf.Dump {
 				fmt.Printf("%s%s:\n", indentStr(indent), k)
 			}
-			tmf.visitObjectMap(dbconn, v, oid, organization, indent+3)
+			tmf.visitMap(dbconn, v, oid, organization, indent+3, visitedObjects)
+
 		case []any:
 			if tmf.Dump {
 				fmt.Printf("%s%s: [\n", indentStr(indent), k)
 			}
-			tmf.visitArray(dbconn, v, oid, organization, indent+3)
+			tmf.visitArray(dbconn, v, oid, organization, indent+3, visitedObjects)
 			if tmf.Dump {
 				fmt.Printf("%s]\n", indentStr(indent))
 			}
-		default:
-			if tmf.Dump {
-				fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
-			}
+
 		}
 	}
 }
 
-func (tmf *TMFdb) visitArray(dbconn *sqlite.Conn, arr []any, oid string, organization string, indent int) {
+func (tmf *TMFdb) visitArray(dbconn *sqlite.Conn, arr []any, oid string, organization string, indent int, visitedObjects map[string]bool) {
 	for i, v := range arr {
 		switch v := v.(type) {
-		case string:
-			if v == "role" {
-				if tmf.Dump {
-					fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-				}
-			} else {
-				if tmf.Dump {
-					fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
-				}
-			}
-
-		case float64:
-			if tmf.Dump {
-				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-			}
-		case bool:
-			if tmf.Dump {
-				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-			}
 		case map[string]any:
 			if tmf.Dump {
 				fmt.Printf("%s%d:\n", indentStr(indent), i)
 			}
-			tmf.visitObjectMap(dbconn, v, oid, organization, indent+3)
+			tmf.visitMap(dbconn, v, oid, organization, indent+3, visitedObjects)
 		case []any:
 			if tmf.Dump {
 				fmt.Printf("%s%d:\n", indentStr(indent), i)
 			}
-			tmf.visitArray(dbconn, v, oid, organization, indent+3)
-		default:
-			if tmf.Dump {
-				fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
-			}
+			tmf.visitArray(dbconn, v, oid, organization, indent+3, visitedObjects)
 		}
 	}
 }
+
+// func (tmf *TMFdb) visitObjectMapTrace(dbconn *sqlite.Conn, currentObject map[string]any, oid string, organization string, indent int) {
+
+// 	// A map object can contain a 'href' field that points to another object.
+// 	// In this case we retrieve and visit the object, if it was not retrieved before.
+// 	// For other map objects we print the relevant fields
+// 	if currentObject["href"] != nil {
+// 		href := currentObject["href"].(string)
+// 		if tmf.Dump {
+// 			fmt.Printf("%shref: %v\n", indentStr(indent), href)
+// 		}
+// 		if !visitedObjects[href] {
+// 			visitedObjects[href] = true
+// 			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, oid, organization, LocalOrRemote)
+// 			if err != nil {
+// 				slog.Error(err.Error())
+// 			} else {
+// 				tmf.visitMap(dbconn, remoteObj.ContentMap, oid, organization, indent+3)
+// 			}
+// 		}
+// 	}
+
+// 	for k, v := range currentObject {
+// 		switch v := v.(type) {
+// 		case string:
+// 			switch k {
+// 			case "href":
+// 				// Skip the href field, as we have processed it before
+// 				continue
+
+// 			case "startDateTime", "lifecycleStatus", "version", "lastUpdate", "created", "updated", "id", "externalReference":
+// 				if tmf.Dump {
+// 					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
+// 				}
+
+// 			case "role":
+// 				if tmf.Dump {
+// 					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
+// 				}
+
+// 			default:
+// 				if tmf.Dump {
+// 					fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
+// 				}
+// 			}
+
+// 		case float64:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
+// 			}
+
+// 		case bool:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
+// 			}
+
+// 		case map[string]any:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%s:\n", indentStr(indent), k)
+// 			}
+// 			tmf.visitMap(dbconn, v, oid, organization, indent+3)
+
+// 		case []any:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%s: [\n", indentStr(indent), k)
+// 			}
+// 			tmf.visitArray(dbconn, v, oid, organization, indent+3)
+// 			if tmf.Dump {
+// 				fmt.Printf("%s]\n", indentStr(indent))
+// 			}
+
+// 		default:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
+// 			}
+// 		}
+// 	}
+// }
+
+// func (tmf *TMFdb) visitArrayTrace(dbconn *sqlite.Conn, arr []any, oid string, organization string, indent int) {
+// 	for i, v := range arr {
+// 		switch v := v.(type) {
+// 		case string:
+// 			if v == "role" {
+// 				if tmf.Dump {
+// 					fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
+// 				}
+// 			} else {
+// 				if tmf.Dump {
+// 					fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
+// 				}
+// 			}
+
+// 		case float64:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
+// 			}
+// 		case bool:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
+// 			}
+// 		case map[string]any:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%d:\n", indentStr(indent), i)
+// 			}
+// 			tmf.visitMap(dbconn, v, oid, organization, indent+3)
+// 		case []any:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%d:\n", indentStr(indent), i)
+// 			}
+// 			tmf.visitArray(dbconn, v, oid, organization, indent+3)
+// 		default:
+// 			if tmf.Dump {
+// 				fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
+// 			}
+// 		}
+// 	}
+// }
 
 // RetrieveRemoteTMFObject retrieves a TMF object from the DOME server.
 //

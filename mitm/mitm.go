@@ -398,7 +398,7 @@ func createCert(dnsNames []string, parent *x509.Certificate, parentKey crypto.Pr
 			Organization: []string{"JRM MITM proxy"},
 		},
 		DNSNames:  dnsNames,
-		NotBefore: time.Now(),
+		NotBefore: time.Now().AddDate(0, 0, -1), // Valid from yesterday, to make sure time zones do not affect validity
 		NotAfter:  time.Now().Add(time.Duration(hoursValid) * time.Hour),
 
 		KeyUsage:              x509.KeyUsageDigitalSignature,

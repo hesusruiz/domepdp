@@ -1,6 +1,8 @@
-package jpath
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
 
-// Version: 24-09-2022
+package jpath
 
 import (
 	"fmt"

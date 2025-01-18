@@ -6,6 +6,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.0.4
 	github.com/goccy/go-json v0.10.4
 	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/rs/cors v1.11.1
 	github.com/samber/slog-formatter v1.1.1
 	github.com/smarty/cproxy/v2 v2.1.1
 	go.opentelemetry.io/otel/trace v1.33.0
