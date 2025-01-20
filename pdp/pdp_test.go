@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/constants"
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 	st "go.starlark.net/starlark"
 )
@@ -33,11 +31,11 @@ func TestPDP_TakeAuthnDecision(t *testing.T) {
 	cd, _ = os.Getwd()
 	print(cd)
 
-	tmfConfig := tmfsync.DefaultConfig(
-		constants.DOME_PRO,
+	tmfConfig := DefaultConfig(
+		DOME_PRO,
 	)
 
-	tmf, err := tmfsync.New(tmfConfig)
+	tmf, err := New(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -86,7 +84,7 @@ def authorize():
 		t.Run(tt.name, func(t *testing.T) {
 
 			m, err := NewPDP(
-				constants.DOME_PRO,
+				DOME_PRO,
 				tt.name,
 				true,
 				tt.args.readFileFun,
@@ -105,11 +103,11 @@ def authorize():
 
 			got, err := m.TakeAuthnDecision(tt.args.decision, input)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("PDP.TakeAuthnDecision() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("TakeAuthnDecision() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if got != tt.want {
-				t.Errorf("PDP.TakeAuthnDecision() = %v, want %v", got, tt.want)
+				t.Errorf("TakeAuthnDecision() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -132,18 +130,18 @@ func BenchmarkAuthDecision(b *testing.B) {
 	cd, _ = os.Getwd()
 	print(cd)
 
-	tmfConfig := tmfsync.DefaultConfig(
-		constants.DOME_PRO,
+	tmfConfig := DefaultConfig(
+		DOME_PRO,
 	)
 
-	tmf, err := tmfsync.New(tmfConfig)
+	tmf, err := New(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
 	defer tmf.Close()
 
 	m, err := NewPDP(
-		constants.DOME_PRO,
+		DOME_PRO,
 		"auth_policies.star",
 		false,
 		nil,

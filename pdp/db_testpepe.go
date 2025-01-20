@@ -1,4 +1,4 @@
-package tmfsync
+package pdp
 
 import (
 	"net/url"

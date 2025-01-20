@@ -19,10 +19,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/hesusruiz/domeproxy/constants"
 	"github.com/hesusruiz/domeproxy/internal/jpath"
 
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 	starjson "go.starlark.net/lib/json"
 	"go.starlark.net/lib/math"
@@ -35,7 +33,7 @@ import (
 
 func init() {
 	// Add our built-ins to the Starlark Universe dictionary before any evaluation begins.
-	// All values here must be immutable and shared among all instances of the PDP.
+	// All values here must be immutable and shared among all instances of the
 	// See here for the standard Starlark entities:
 	// https://github.com/google/starlark-go/blob/master/doc/spec.md#built-in-constants-and-functions
 
@@ -78,7 +76,7 @@ type PDP struct {
 
 	// environment is the run-time environment (production or development) where the PDP executes.
 	// Some things behave differently by default, like logging level.
-	environment constants.Environment
+	environment Environment
 
 	// The name of the file where the policy rules resides.
 	scriptname string
@@ -91,7 +89,7 @@ type PDP struct {
 	// and the PDP retrieves it dynamically depending on the environment.
 	// The caller is able to provide a function to retrieve the key from a different place.
 	verifierJWK        *jose.JSONWebKey
-	verificationKeyFun func(environment constants.Environment) (*jose.JSONWebKey, error)
+	verificationKeyFun func(environment Environment) (*jose.JSONWebKey, error)
 
 	debug bool
 
@@ -104,11 +102,11 @@ type PDP struct {
 	threadPool sync.Pool
 }
 
-func NewPDP(environment constants.Environment,
+func NewPDP(environment Environment,
 	fileName string,
 	debug bool,
 	readFileFun func(fileName string) ([]byte, bool, error),
-	verificationKeyFunc func(environment constants.Environment) (*jose.JSONWebKey, error),
+	verificationKeyFunc func(environment Environment) (*jose.JSONWebKey, error),
 ) (*PDP, error) {
 
 	m := &PDP{}
@@ -154,7 +152,7 @@ func NewPDP(environment constants.Environment,
 // defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
 //
 // It receives the runtime environment, enabling a different mechanism depending on it.
-func defaultVerificationKey(environment constants.Environment) (*jose.JSONWebKey, error) {
+func defaultVerificationKey(environment Environment) (*jose.JSONWebKey, error) {
 
 	// Retrieve the OpenID configuration from the Verifier
 	oid, err := NewOpenIDConfig(environment)
@@ -375,7 +373,7 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 // - the Verifiable Credential with the information from the caller needed for the decision
 // - the protected resource that the caller identified in the Credential wants to access
 
-func (m *PDP) TakeAuthnDecisionOPAStyle(decision Decision, r *http.Request, tokString string, tmfObject *tmfsync.TMFObject) (bool, error) {
+func (m *PDP) TakeAuthnDecisionOPAStyle(decision Decision, r *http.Request, tokString string, tmfObject *TMFObject) (bool, error) {
 	var err error
 
 	// Verify the token and extract the claims.

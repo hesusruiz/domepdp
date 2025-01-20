@@ -2,7 +2,7 @@
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
 
-package tmapi
+package tmfapi
 
 import (
 	"context"
@@ -14,8 +14,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/constants"
-	"github.com/hesusruiz/domeproxy/tmfsync"
+	"github.com/hesusruiz/domeproxy/pdp"
 	"github.com/rs/cors"
 )
 
@@ -27,11 +26,11 @@ import (
 //     evaluating the policies before the requests arrive to the actual implementation of the APIs.
 //  2. As a 'pure' PDP, acting as an authorization server for some upstream PIP like NGINX. In this
 //     mode, requests are intercepted by the PIP which asks the PDP for an authorization decision.
-func TMFServerHandler(environment constants.Environment, pdpAddress string, debug bool) (tmfConfig *tmfsync.Config, execute func() error, interrupt func(error), err error) {
+func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool) (tmfConfig *pdp.Config, execute func() error, interrupt func(error), err error) {
 
 	// Set the defaul configuration, depending on the environment
-	tmfConfig = tmfsync.DefaultConfig(environment)
-	tmf, err := tmfsync.New(tmfConfig)
+	tmfConfig = pdp.DefaultConfig(environment)
+	tmf, err := pdp.New(tmfConfig)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -16,11 +16,11 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/constants"
 	"github.com/hesusruiz/domeproxy/internal/run"
 	"github.com/hesusruiz/domeproxy/mitm"
+	"github.com/hesusruiz/domeproxy/pdp"
 
-	"github.com/hesusruiz/domeproxy/tmapi"
+	"github.com/hesusruiz/domeproxy/tmfapi"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -65,9 +65,9 @@ func main() {
 		}
 	}()
 
-	var environment = constants.DOME_DEV2
+	var environment = pdp.DOME_DEV2
 	if *prod {
-		environment = constants.DOME_PRO
+		environment = pdp.DOME_PRO
 		fmt.Println("Using the PRODUCTION environment")
 	} else {
 		fmt.Println("Using the DEV2 environment")
@@ -77,7 +77,7 @@ func main() {
 	var gr run.Group
 
 	// Configure the PDP server to receive/authorize intercepted requests
-	tmfConfig, execute, interrupt, err := tmapi.TMFServerHandler(environment, *pdpAddress, *debug)
+	tmfConfig, execute, interrupt, err := tmfapi.TMFServerHandler(environment, *pdpAddress, *debug)
 	if err != nil {
 		panic(err)
 	}

@@ -10,8 +10,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/constants"
-	"github.com/hesusruiz/domeproxy/tmfsync"
+	"github.com/hesusruiz/domeproxy/pdp"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -28,28 +27,28 @@ func main() {
 
 	flag.Parse()
 
-	var server constants.Environment
+	var server pdp.Environment
 	if *production {
-		server = constants.DOME_PRO
+		server = pdp.DOME_PRO
 		if *delete {
-			os.Remove(tmfsync.PRO_dbname)
-			os.Remove(tmfsync.PRO_dbname + "-shm")
-			os.Remove(tmfsync.PRO_dbname + "-wal")
+			os.Remove(pdp.PRO_dbname)
+			os.Remove(pdp.PRO_dbname + "-shm")
+			os.Remove(pdp.PRO_dbname + "-wal")
 		}
 	} else {
-		server = constants.DOME_DEV2
+		server = pdp.DOME_DEV2
 		if *delete {
-			os.Remove(tmfsync.DEV2_dbname)
-			os.Remove(tmfsync.DEV2_dbname + "-shm")
-			os.Remove(tmfsync.DEV2_dbname + "-wal")
+			os.Remove(pdp.DEV2_dbname)
+			os.Remove(pdp.DEV2_dbname + "-shm")
+			os.Remove(pdp.DEV2_dbname + "-wal")
 		}
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	tmfConfig := tmfsync.DefaultConfig(server)
+	tmfConfig := pdp.DefaultConfig(server)
 
-	tmf, err := tmfsync.New(tmfConfig)
+	tmf, err := pdp.New(tmfConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

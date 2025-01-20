@@ -2,12 +2,10 @@
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
 
-package tmfsync
+package pdp
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,93 +20,6 @@ import (
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
-type TMFObject struct {
-	ID                     string         `json:"id"`
-	Type                   string         `json:"type"`
-	Name                   string         `json:"name"`
-	Description            string         `json:"description"`
-	LifecycleStatus        string         `json:"lifecycleStatus"`
-	Version                string         `json:"version"`
-	LastUpdate             string         `json:"lastUpdate"`
-	ContentMap             map[string]any `json:"-"` // The content of the object as a map
-	Content                []byte         `json:"-"` // The content of the object as a JSON byte array
-	Organization           string         `json:"organization"`
-	OrganizationIdentifier string         `json:"organizationIdentifier"`
-	Updated                int64          `json:"updated"`
-}
-
-func NewTMFObject(oMap map[string]any, content []byte) (*TMFObject, error) {
-
-	// Deduce the type of the object from the ID
-	poType, err := TMFObjectIDtoType(oMap["id"].(string))
-	if err != nil {
-		return nil, err
-	}
-
-	// Canonicalize (if needed) the JSON object for the content field
-	if content == nil {
-		content, err = json.Marshal(oMap)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Extract the fields from the map, if they exist
-	name, _ := oMap["name"].(string)
-	description, _ := oMap["description"].(string)
-	lifecycleStatus, _ := oMap["lifecycleStatus"].(string)
-	version, _ := oMap["version"].(string)
-	lastUpdate, _ := oMap["lastUpdate"].(string)
-	updated, _ := oMap["updated"].(int64)
-	organizationIdentifier, _ := oMap["organizationIdentifier"].(string)
-	organization, _ := oMap["organization"].(string)
-
-	// Create a TMFObject struct from the map
-	po := &TMFObject{
-		ID:                     oMap["id"].(string),
-		Type:                   poType,
-		Name:                   name,
-		Description:            description,
-		LifecycleStatus:        lifecycleStatus,
-		Version:                version,
-		LastUpdate:             lastUpdate,
-		ContentMap:             oMap,
-		Content:                content,
-		OrganizationIdentifier: organizationIdentifier,
-		Organization:           organization,
-		Updated:                updated,
-	}
-
-	return po, nil
-}
-
-func (po *TMFObject) String() string {
-	return fmt.Sprintf("ID: %s\nType: %s\nName: %s\nLifecycleStatus: %s\nVersion: %s\nLastUpdate: %s\n", po.ID, po.Type, po.Name, po.LifecycleStatus, po.Version, po.LastUpdate)
-}
-
-func (po *TMFObject) UpdateInMemoryWithOwner(organizationIdentifier string, organization string) (*TMFObject, error) {
-	po.OrganizationIdentifier = organizationIdentifier
-	po.ContentMap["organizationIdentifier"] = organizationIdentifier
-	po.Organization = organization
-	po.ContentMap["organization"] = organization
-
-	// Update the content field
-	poJSON, err := json.Marshal(po.ContentMap)
-	if err != nil {
-		return nil, err
-	}
-
-	po.Content = poJSON
-
-	return po, nil
-}
-
-func (po *TMFObject) Hash() []byte {
-	hasher := sha256.New()
-	hasher.Write(po.Content)
-	return hasher.Sum(nil)
-}
-
 type AccessType bool
 
 const OnlyLocal AccessType = true
@@ -121,7 +32,7 @@ func (at AccessType) String() string {
 	return "LocalOrRemote"
 }
 
-// TMFdb is a struct that holds a pool of connections to the database and the URL of the DOME server
+// TMFdb is a struct that holds a pool of connections to the database and the URL of the DOME server.
 //
 // The database connection is a pool of connections that is shared by all the requests in this object.
 // The connection is returned to the pool when the object is closed.
@@ -173,7 +84,8 @@ func createTables(dbpool *sqlitex.Pool) error {
 
 	// Create the table if it does not exist
 	if err := sqlitex.ExecuteScript(conn, createTMFTableSQL, nil); err != nil {
-		return err
+		slog.Error("createTables", slogor.Err(err))
+		return fmt.Errorf("createTables: %w", err)
 	}
 
 	return nil
@@ -450,7 +362,7 @@ func (tmf *TMFdb) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error)
 
 							// Now that we have the owner, update the local database for the productSpecification object
 							if len(owner.OrganizationIdentifier) == 0 {
-								owner, _ = owner.UpdateInMemoryWithOwner(oid, organization)
+								owner, _ = owner.SetOwner(oid, organization)
 								err := tmf.UpsertTMFObject(nil, owner)
 								if err != nil {
 									slog.Error(err.Error())
@@ -458,7 +370,7 @@ func (tmf *TMFdb) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error)
 								}
 							}
 							if len(po.OrganizationIdentifier) == 0 {
-								po, _ = po.UpdateInMemoryWithOwner(oid, organization)
+								po, _ = po.SetOwner(oid, organization)
 								err := tmf.UpsertTMFObject(nil, po)
 								if err != nil {
 									slog.Error(err.Error())
@@ -544,7 +456,7 @@ func (tmf *TMFdb) GetProductOfferingOwner(dbconn *sqlite.Conn, productOfferingMa
 
 					// Now that we have the owner, update the local database for the productSpecification object
 					if len(owner.OrganizationIdentifier) == 0 || len(owner.Organization) == 0 {
-						owner, _ = owner.UpdateInMemoryWithOwner(oid, organization)
+						owner, _ = owner.SetOwner(oid, organization)
 						err := tmf.UpsertTMFObject(dbconn, owner)
 						if err != nil {
 							slog.Error(err.Error())
@@ -552,7 +464,7 @@ func (tmf *TMFdb) GetProductOfferingOwner(dbconn *sqlite.Conn, productOfferingMa
 						}
 					}
 					if len(ps.OrganizationIdentifier) == 0 || len(ps.Organization) == 0 {
-						ps, _ = ps.UpdateInMemoryWithOwner(oid, organization)
+						ps, _ = ps.SetOwner(oid, organization)
 						err := tmf.UpsertTMFObject(dbconn, ps)
 						if err != nil {
 							slog.Error(err.Error())
@@ -568,81 +480,6 @@ func (tmf *TMFdb) GetProductOfferingOwner(dbconn *sqlite.Conn, productOfferingMa
 	}
 
 	return nil, fmt.Errorf("relatedParty is nil")
-}
-
-func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
-
-	if dbconn == nil {
-		var err error
-		dbconn, err = tmf.dbpool.Take(context.Background())
-		if err != nil {
-			return err
-		}
-		defer func() {
-			tmf.dbpool.Put(dbconn)
-
-		}()
-	}
-
-	// Get the type of object from the ID
-	objectType, err := TMFObjectIDtoType(po.ID)
-	if err != nil {
-		return err
-	}
-	po.Type = objectType
-
-	// Categories do not have an owner. Make sure we do not set the owner field to something else
-	if po.Type == "category" {
-		po.OrganizationIdentifier = ""
-		po.Organization = ""
-	}
-
-	// Check if the row already exists, with the same version
-	hasRow, hash, freshness, err := tmf.CheckIfExists(dbconn, po.ID, po.Version)
-	if err != nil {
-		return err
-	}
-
-	// The id and version are the same, but we have to check the hash to see if we have to update the record
-	if hasRow {
-
-		fresh := freshness < tmf.Maxfreshness
-		newHash := po.Hash()
-
-		// Check if the data is recent enough and the hash of the content is the same
-		if fresh && bytes.Equal(hash, newHash) {
-			// The hash of the content is the same, so return immediately
-			slog.Debug("Upsert: row exists and fresh", "id", po.ID)
-			return nil
-		}
-
-		// The row has to be updated.
-		// We do not have to update the id and version fields.
-		err = tmf.UpdateInStorage(dbconn, po)
-		if err != nil {
-			return err
-		}
-
-		if !fresh {
-			slog.Debug("Upsert: row updated (not fresh)", "id", po.ID)
-		} else {
-			slog.Debug("Upsert: row updated (hash different)", "id", po.ID, "old", hash, "new", newHash)
-		}
-
-		return nil // Skip inserting if the row already exists
-	}
-
-	// There was no record with the same id and version, so insert the full object
-	err = tmf.InsertInStorage(dbconn, po)
-	if err != nil {
-		slog.Error("UpsertTMFObject", "href", po.ID, "version", po.Version, "error", err)
-		return err
-	}
-
-	// slog.Debug("Inserted row", "id", po.ID)
-	fmt.Println("Upsert: row inserted", "id", po.ID)
-
-	return nil
 }
 
 // RetrieveOrUpdateObject retrieves an object from the local database or from the server if it is not in the local database.
@@ -684,7 +521,7 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 		if localpo.OrganizationIdentifier == "" && oid != "" {
 
 			// Set the owner id
-			localpo, err = localpo.UpdateInMemoryWithOwner(oid, organization)
+			localpo, err = localpo.SetOwner(oid, organization)
 			if err != nil {
 				return nil, false, err
 			}
@@ -722,7 +559,7 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 	}
 
 	// Set the owner id, because remote objects do not have it
-	remotepo, err = remotepo.UpdateInMemoryWithOwner(oid, organization)
+	remotepo, err = remotepo.SetOwner(oid, organization)
 	if err != nil {
 		return nil, false, err
 	}

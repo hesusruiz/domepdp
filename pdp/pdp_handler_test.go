@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/hesusruiz/domeproxy/constants"
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -32,7 +30,7 @@ var testJWK = `{
 }
 `
 
-func verificationKeyFunc(environment constants.Environment) (*jose.JSONWebKey, error) {
+func verificationKeyFunc(environment Environment) (*jose.JSONWebKey, error) {
 	k := &jose.JSONWebKey{}
 	err := k.UnmarshalJSON([]byte(testJWK))
 	if err != nil {
@@ -57,11 +55,11 @@ func TestPDP_Handler(t *testing.T) {
 	cd, _ = os.Getwd()
 	print(cd)
 
-	tmfConfig := tmfsync.DefaultConfig(
-		constants.DOME_PRO,
+	tmfConfig := DefaultConfig(
+		DOME_PRO,
 	)
 
-	tmf, err := tmfsync.New(tmfConfig)
+	tmf, err := New(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -121,7 +119,7 @@ def authorize():
 			logger := slog.Default()
 
 			rulesEngine, err := NewPDP(
-				constants.DOME_PRO,
+				DOME_PRO,
 				tt.name,
 				true,
 				tt.args.readFileFun,
@@ -149,7 +147,7 @@ def authorize():
 			fmt.Println(string(body))
 
 			if resp.StatusCode != tt.wantStatusCode {
-				t.Errorf("PDP.TakeAuthnDecision status = %v, wantStatus %v", resp.StatusCode, tt.wantStatusCode)
+				t.Errorf("TakeAuthnDecision status = %v, wantStatus %v", resp.StatusCode, tt.wantStatusCode)
 				return
 			}
 
@@ -175,11 +173,11 @@ func BenchmarkPDPhandler(b *testing.B) {
 	cd, _ = os.Getwd()
 	print(cd)
 
-	tmfConfig := tmfsync.DefaultConfig(
-		constants.DOME_PRO,
+	tmfConfig := DefaultConfig(
+		DOME_PRO,
 	)
 
-	tmf, err := tmfsync.New(tmfConfig)
+	tmf, err := New(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -198,7 +196,7 @@ def authorize():
 	}
 
 	rulesEngine, err := NewPDP(
-		constants.DOME_PRO,
+		DOME_PRO,
 		"test1",
 		false,
 		readFileFun,

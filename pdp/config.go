@@ -2,15 +2,19 @@
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
 
-package tmfsync
+package pdp
 
 import (
 	"log"
 	"os"
 
-	"github.com/hesusruiz/domeproxy/constants"
 	"gopkg.in/yaml.v3"
 )
+
+type Environment int
+
+const DOME_PRO Environment = 0
+const DOME_DEV2 Environment = 1
 
 const DEV2_DOMEServer = "https://dome-marketplace-dev2.org"
 const PRO_DOMEServer = "https://dome-marketplace.eu"
@@ -19,7 +23,7 @@ const DEV2_dbname = "./tmf-dev2.db"
 const PRO_dbname = "./tmf.db"
 
 type Config struct {
-	Environment constants.Environment
+	Environment Environment
 	RootDir     string
 	CaCertFile  string
 	CaKeyFile   string
@@ -54,16 +58,16 @@ var DEV2HostTargets = []string{
 	"dome-marketplace-dev2.org",
 }
 
-func DefaultConfig(where constants.Environment) *Config {
+func DefaultConfig(where Environment) *Config {
 	conf := &Config{Environment: where}
 
-	if where == constants.DOME_DEV2 {
+	if where == DOME_DEV2 {
 
 		conf.HostTargets = DEV2HostTargets
 		conf.DomeServer = DEV2_DOMEServer
 		conf.Dbname = DEV2_dbname
 
-	} else if where == constants.DOME_PRO {
+	} else if where == DOME_PRO {
 
 		conf.HostTargets = PROHostTargets
 		conf.DomeServer = PRO_DOMEServer

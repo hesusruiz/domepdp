@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/constants"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -142,11 +141,11 @@ func DOME_JWKS() (jose.JSONWebKeySet, error) {
 const DOME_DEV2_WellKnown = "https://verifier.dome-marketplace-dev2.org/.well-known/openid-configuration"
 const DOME_PRO_WellKnown = "https://verifier.dome-marketplace-prd.org/.well-known/openid-configuration"
 
-func NewOpenIDConfig(environment constants.Environment) (*OpenIDConfig, error) {
+func NewOpenIDConfig(environment Environment) (*OpenIDConfig, error) {
 
 	verifierWellKnownURL := DOME_DEV2_WellKnown
 
-	if environment == constants.DOME_PRO {
+	if environment == DOME_PRO {
 		verifierWellKnownURL = DOME_PRO_WellKnown
 	}
 

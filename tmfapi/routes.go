@@ -2,25 +2,25 @@
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
 
-package tmapi
+package tmfapi
 
 import (
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
+	"time"
 
 	"github.com/goccy/go-json"
 
-	"github.com/hesusruiz/domeproxy/constants"
 	"github.com/hesusruiz/domeproxy/pdp"
-	"github.com/hesusruiz/domeproxy/tmfsync"
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )
 
 func addHttpRoutes(
-	environment constants.Environment,
+	environment pdp.Environment,
 	mux *http.ServeMux,
-	tmf *tmfsync.TMFdb,
+	tmf *pdp.TMFdb,
 	debug bool,
 ) {
 
@@ -80,25 +80,41 @@ func addHttpRoutes(
 }
 
 // handleGETlist retrieves a list of objects, subject to filtering
-func handleGETlist(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handleGETlist(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+
+		start := time.Now()
 
 		// For the moment, a LIST request does not go through authorization, and is fully public
 		_ = ruleEngine
 
+		// Retrieve the list of objects according to the parameters specified in the HTTP request
 		logger.Info("GET LIST", "type", tmfType)
-		tmfObjectList, err := retrieveList(tmf, tmfType, r)
+
+		// Set the proper fields in the request
+		r.Header.Set("X-Original-URI", r.URL.RequestURI())
+		r.Header.Set("X-Original-Method", "GET")
+
+		// tmfObjectList, err := retrieveList(tmf, tmfType, r)
+		tmfObjectList, err := pdp.HandleLISTAuth(logger, tmf, ruleEngine, r)
 		if err != nil {
 			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
 			logger.Error("retrieving", slogor.Err(err))
 			return
 		}
 
+		// Create the output list with the map content fields, ready for marshalling
 		var listMaps = []map[string]any{}
 		for _, v := range tmfObjectList {
 			listMaps = append(listMaps, v.ContentMap)
 		}
 
+		// We must send a randomly ordered list, to preserve fairness in the presentation of the offerings
+		rand.Shuffle(len(listMaps), func(i, j int) {
+			listMaps[i], listMaps[j] = listMaps[j], listMaps[i]
+		})
+
+		// Create the JSON representation of the list of objects
 		out, err := json.Marshal(listMaps)
 		if err != nil {
 			errorTMF(w, http.StatusInternalServerError, "error marshalling list", err.Error())
@@ -108,11 +124,15 @@ func handleGETlist(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, rule
 
 		replyTMF(w, out)
 
+		end := time.Now()
+		latency := end.Sub(start)
+		slog.Info("GET LIST", "latency", slog.Duration("latency", latency))
+
 	}
 }
 
 // handleGET retrieves a single TMF object, subject to authorization policy rules
-func handleGET(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handleGET(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		logger.Info("GET", "type", tmfType, slog.Any("request", r))
@@ -133,7 +153,7 @@ func handleGET(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngi
 	}
 }
 
-func handlePOST(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handlePOST(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		logger.Info("POST", "type", tmfType, slog.Any("request", r))
@@ -154,7 +174,7 @@ func handlePOST(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEng
 	}
 }
 
-func handlePATCH(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
+func handlePATCH(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, ruleEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		logger.Info("PATCH", "type", tmfType, slog.Any("request", r))
@@ -173,22 +193,4 @@ func handlePATCH(tmfType string, logger *slog.Logger, tmf *tmfsync.TMFdb, ruleEn
 		replyTMF(w, tmfObject.Content)
 
 	}
-}
-
-func retrieveList(tmf *tmfsync.TMFdb, tmfType string, r *http.Request) ([]*tmfsync.TMFObject, error) {
-
-	r.ParseForm()
-
-	slog.Debug("retrieving", "type", tmfType)
-
-	// Retrieve the product offerings
-	objects, _, err := tmf.RetrieveLocalListTMFObject(nil, tmfType, r.Form)
-	if err != nil {
-		return nil, err
-	}
-
-	slog.Debug("object retrieved locally")
-
-	return objects, nil
-
 }

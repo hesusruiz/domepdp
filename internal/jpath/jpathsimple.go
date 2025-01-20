@@ -274,18 +274,19 @@ func Get(src any, path string) (any, error) {
 			}
 
 		default:
+
+			// For other types, use reflection
 			srcKind := reflect.TypeOf(src).Kind()
 			srcValue := reflect.ValueOf(src)
 
 			if srcKind == reflect.Map {
 				newValue := srcValue.MapIndex(reflect.ValueOf(pathComponent))
+
+				if !newValue.IsValid() || newValue.IsZero() {
+					return nil, fmt.Errorf("jpath.Get: nonexistent map key at %q",
+						strings.Join(parts[:pos+1], "."))
+				}
 				src = newValue.Interface()
-				// if value, ok := s[pathComponent]; ok {
-				// 	src = value
-				// } else {
-				// 	return nil, fmt.Errorf("jpath.Get: nonexistent map key at %q",
-				// 		strings.Join(parts[:pos+1], "."))
-				// }
 
 				continue
 			}
