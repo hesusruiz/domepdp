@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/julienschmidt/httprouter v1.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/samber/lo v1.47.0 // indirect
 	github.com/samber/slog-multi v1.2.4 // indirect

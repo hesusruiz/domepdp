@@ -27,11 +27,12 @@ import (
 func main() {
 
 	pdpAddress := flag.String("pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
-	proxyAddress := flag.String("proxy", ":8888", "address of the PROXY server intercepting requests to/from the Marketplace")
-	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA")
-	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA")
-	prod := flag.Bool("pro", false, "use the PRODUCTION environment")
+	mitmAddress := flag.String("mitm", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
+	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
+	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
+	proxyPassword := flag.String("password", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
 	debug := flag.Bool("debug", false, "run in debug mode with more logs enabled")
+	var envir = flag.String("env", "lcl", "environment, one of lcl, dev2 or pro.")
 
 	flag.Parse()
 
@@ -65,15 +66,26 @@ func main() {
 		}
 	}()
 
+	// By default we will operate in the DEV2 environment
 	var environment = pdp.DOME_DEV2
-	if *prod {
+
+	switch *envir {
+	case "pro":
 		environment = pdp.DOME_PRO
 		fmt.Println("Using the PRODUCTION environment")
-	} else {
+	case "dev2":
+		environment = pdp.DOME_DEV2
 		fmt.Println("Using the DEV2 environment")
+	case "lcl":
+		environment = pdp.DOME_LCL
+		fmt.Println("Using the LCL environment")
+	default:
+		fmt.Printf("unknown environment: %v. Must be one of lcl, dev2 or pro\n", *envir)
+		os.Exit(1)
 	}
 
-	// Group collects actors (functions) and runs them concurrently. When one actor (function) returns, all actors are interrupted.
+	// Group collects actors (functions) and runs them concurrently. When one actor (function) returns,
+	// all actors are interrupted.
 	var gr run.Group
 
 	// Configure the PDP server to receive/authorize intercepted requests
@@ -87,13 +99,18 @@ func main() {
 
 	// Start a MITM server to intercept the requests to the TMF APIs
 	mitmConfig := &mitm.Config{
-		Listen:      *proxyAddress,
-		CaCertFile:  *caCertFile,
-		CaKeyFile:   *caKeyFile,
-		HostTargets: tmfConfig.HostTargets,
+		Listen:        *mitmAddress,
+		CaCertFile:    *caCertFile,
+		CaKeyFile:     *caKeyFile,
+		ProxyPassword: *proxyPassword,
+		HostTargets:   tmfConfig.HostTargets,
 	}
 	pdpServer := "http://localhost" + *pdpAddress
-	gr.Add(mitm.MITMServerHandler(mitmConfig, pdpServer))
+	execute, interrupt, err = mitm.MITMServerHandler(mitmConfig, pdpServer)
+	if err != nil {
+		panic(err)
+	}
+	gr.Add(execute, interrupt)
 
 	// The management of the interrupt signal (ctrl-c)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

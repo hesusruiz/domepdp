@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/hesusruiz/domeproxy/internal/jpath"
@@ -19,31 +20,43 @@ import (
 	st "go.starlark.net/starlark"
 )
 
-// HandleGETAuthorization returns an [http.Handler] which asks for an authorization decision from the PDP by evaluation of the proper policy rules.
-// The parameter tmf should be an already instantiated [TMFdb] databas manager. It also expects in ruleEngine an instance of a
-// policy engine.
-func HandleGETAuthorization(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP) func(w http.ResponseWriter, r *http.Request) {
+// HandleGETAuthorization returns an [http.Handler] which asks for an authorization decision from the PDP
+// by evaluation of the proper policy rules.
+// The parameter tmf should be an already instantiated [TMFdb] database manager.
+// It also expects in ruleEngine an instance of a policy engine.
+func HandleGETAuthorization(
+	logger *slog.Logger,
+	tmf *TMFdb,
+	ruleEngine *PDP,
+) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		// Check authorization as if we are reading the object, but we are only interested in
+		// the authorization result, not in the object itself.
 		_, err := HandleREADAuth(logger, tmf, ruleEngine, r)
 		if err != nil {
+			// The user can not access the object
 			slog.Error("forbidden", slogor.Err(err), "URI", r.URL.RequestURI())
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 
+		// The user is granted access to the object
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 	}
 }
 
-func HandleLISTAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request) ([]*TMFObject, error) {
+// HandleLISTAuth processes a GET request to retrieve a list of TMF objects
+func HandleLISTAuth(
+	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+) ([]*TMFObject, error) {
 
 	// ***********************************************************************************
-	// 1. Process the request and get the type of object we are processing.
+	// 1. Parse the request and get the type of object we are processing.
 	// ***********************************************************************************
 
-	requestArgument, err := processInputRequest(logger, r)
+	requestArgument, err := parseInputRequest(logger, r)
 	if err != nil {
 		slog.Error("HandleREADAuth: error in HTTP request", slogor.Err(err))
 		return nil, fmt.Errorf("HandleREADAuth: error in HTTP request: %W", err)
@@ -58,174 +71,116 @@ func HandleLISTAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Re
 	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err))
-		return nil, fmt.Errorf("access token missing or not valid")
+		return nil, fmt.Errorf("processing the access token: %w", err)
 	}
 
 	// ****************************************************************************
-	// 4. Build the user object from the Access Token.
+	// 3. Build the user object from the Access Token.
 	// ****************************************************************************
 
-	userArgument := StarTMFMap{}
-
-	if tokString == "" {
-		userArgument["isAuthenticated"] = false
-		userArgument["isOwner"] = false
-		userArgument["country"] = ""
-		userArgument["organizationIdentifier"] = ""
-
-	} else {
-
-		userArgument["isAuthenticated"] = true
-
-		var isLEAR bool
-		if len(tokString) > 0 {
-
-			verifiableCredential := jpath.GetMap(tokenArgument, "vc")
-			if len(verifiableCredential) > 0 {
-				powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-				for _, p := range powers {
-					if jpath.GetString(p, "tmf_type") == "Domain" &&
-						jpath.GetString(p, "tmf_domain") == "DOME" &&
-						jpath.GetString(p, "tmf_function") == "Onboarding" &&
-						jpath.GetString(p, "tmf_action") == "Execute" {
-
-						isLEAR = true
-					}
-				}
-
-			} else {
-				verifiableCredential = jpath.GetMap(tokenArgument, "verifiableCredential")
-				powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-				for _, p := range powers {
-					if jpath.GetString(p, "tmfType") == "Domain" &&
-						jpath.GetString(p, "tmfDomain") == "DOME" &&
-						jpath.GetString(p, "tmfFunction") == "Onboarding" &&
-						jpath.GetString(p, "tmfAction") == "Execute" {
-
-						isLEAR = true
-					}
-				}
-
-			}
-			userArgument["isLEAR"] = isLEAR
-
-			// Get the organizationIdentifier of the user
-			userOrganizationIdentifier := jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.organizationIdentifier")
-
-			userArgument["organizationIdentifier"] = userOrganizationIdentifier
-
-			userArgument["country"] = jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.country")
-
-		}
-
-	}
+	// The returned user object always exists.
+	// If the token was not provided or the user info does not exist, we get a default user object
+	// probably only useful for reading public information.
+	userArgument := parseUserInfo(tokString, tokenArgument)
 
 	// ***************************************************************************************
-	// 3. Retrieve the list of objects locally.
+	// 4. Retrieve the list of TMF objects locally.
 	// ***************************************************************************************
 
 	r.ParseForm()
 
-	// Retrieve the product offerings
-	candidateObjects, _, err := tmf.RetrieveLocalListTMFObject(nil, tmfType, r.Form)
-	if err != nil {
-		return nil, err
+	var finalObjects []*TMFObject
+	var limit int
+
+	// Check if there is a limit requested by the user
+	limitStr := r.Form.Get("limit")
+	if limitStr != "" {
+		limit, _ = strconv.Atoi(limitStr)
 	}
 
-	var finalObjects []*TMFObject
+	// Loop until we have retrieved enough objects or there are not any more
+	for {
 
-	// Process each object in the list
-	for _, tmfObject := range candidateObjects {
-
-		// Set the map representation
-		oMap := tmfObject.ContentMap
-		oMap["type"] = tmfObject.Type
-		oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
-
-		tmfArgument := StarTMFMap(oMap)
-
-		// Update the isOwner attribute of the user according to the object information
-		if userArgument["organizationIdentifier"] != "" {
-			userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.OrganizationIdentifier)
+		// limit <= 0 means no limit in this context
+		if limit > 0 && len(finalObjects) >= limit {
+			break
 		}
 
-		// *********************************************************************************
-		// 5. Build the convenience data object from the usage terms embedded in the TMF object.
-		// *********************************************************************************
-
-		// We convert the complex structure into simple lists of countries and operator identifiers
-		permittedLegalRegions := getRestrictionElements(tmfArgument, "permittedLegalRegion")
-		tmfArgument["permittedCountries"] = permittedLegalRegions
-
-		prohibitedLegalRegions := getRestrictionElements(tmfArgument, "prohibitedLegalRegion")
-		tmfArgument["permittedCountries"] = prohibitedLegalRegions
-
-		permittedOperators := getRestrictionElements(tmfArgument, "permittedOperator")
-		tmfArgument["permittedCountries"] = permittedOperators
-
-		prohibitedOperators := getRestrictionElements(tmfArgument, "prohibitedOperator")
-		tmfArgument["permittedCountries"] = prohibitedOperators
-
-		// *********************************************************************************
-		// 6. Pass the request, the object and the user to the rules engine for a decision.
-		// *********************************************************************************
-
-		// Assemble all data in a single "input" argument, to the style of OPA.
-		// We mutate the predeclared identifier, so the policy can access the data for this request.
-		// We can also service possible callbacks from the rules engine.
-		input := StarTMFMap{
-			"request": requestArgument,
-			"token":   tokenArgument,
-			"tmf":     tmfArgument,
-			"user":    userArgument,
-		}
-
-		decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
-
-		// An error is considered a rejection, continue with the next candidate object
+		// Retrieve the product offerings
+		candidateObjects, _, err := tmf.RetrieveLocalListTMFObject(nil, tmfType, r.Form)
 		if err != nil {
-			slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
-			continue
+			return nil, err
 		}
 
-		// The rules engine rejected the request, continue with the next candidate object
-		if !decision {
-			slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
-			continue
+		// No more objects, process what we have
+		if len(candidateObjects) == 0 {
+			break
 		}
 
-		// The rules engine accepted the request, add the object to the final list
-		slog.Info("Authorized Authorized")
-		finalObjects = append(finalObjects, tmfObject)
+		// Process each object in the candidate list
+		for _, tmfObject := range candidateObjects {
+
+			// Set the map representation
+			oMap := tmfObject.ContentMap
+			oMap["type"] = tmfObject.Type
+			oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
+
+			tmfObjectArgument := StarTMFMap(oMap)
+
+			// Update the isOwner attribute of the user according to the object information
+			if len(userArgument["organizationIdentifier"].(string)) > 0 {
+				userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.OrganizationIdentifier)
+			}
+
+			// *********************************************************************************
+			// 5. Build the convenience data object from the usage terms embedded in the TMF object.
+			// *********************************************************************************
+
+			// We convert the complex structure into simple lists of countries and operator identifiers
+			permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
+			tmfObjectArgument["permittedCountries"] = permittedLegalRegions
+
+			prohibitedLegalRegions := getRestrictionElements(tmfObjectArgument, "prohibitedLegalRegion")
+			tmfObjectArgument["permittedCountries"] = prohibitedLegalRegions
+
+			permittedOperators := getRestrictionElements(tmfObjectArgument, "permittedOperator")
+			tmfObjectArgument["permittedCountries"] = permittedOperators
+
+			prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
+			tmfObjectArgument["permittedCountries"] = prohibitedOperators
+
+			// *********************************************************************************
+			// 6. Pass the request, the object and the user to the rules engine for a decision.
+			// *********************************************************************************
+
+			userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, tmfObjectArgument, userArgument)
+			if userCanAccessObject {
+				finalObjects = append(finalObjects, tmfObject)
+			}
+
+		}
 
 	}
 
 	// *********************************************************************************
-	// 7. Reply to the caller with the object, if the rules engine did not deny the operation.
+	// 7. Reply to the caller with the list of authorised objects, which can be empty
 	// *********************************************************************************
 
 	return finalObjects, nil
 }
 
 /*
-HandleREADAuth manages the read process of a TMForum object (the GET method).
-
-The process is the following:
-1. Process the request and get the 'id' of the object to be updated from the path of the request.
-2. Process the Access Token if it comes with the request.
-3. Retrieve the current object, either from the cache or remotely.
-4. Build the user object, combining info from the Access Token and the retrieved object.
-5. Build the convenience data object from the usage terms embedded in the TMF object.
-6. Pass the request, the object and the user to the rules engine for a decision.
-7. Reply to the caller with the object, if the rules engine did not deny the operation.
+HandleREADAuth manages the read process of a single TMForum object (the GET method).
 */
-func HandleREADAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request) (*TMFObject, error) {
+func HandleREADAuth(
+	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+) (*TMFObject, error) {
 
 	// ***********************************************************************************
-	// 1. Process the request and get the 'id' of the object from the path of the request.
+	// 1. Parse the request and get the 'id' of the object from the path of the request.
 	// ***********************************************************************************
 
-	requestArgument, err := processInputRequest(logger, r)
+	requestArgument, err := parseInputRequest(logger, r)
 	if err != nil {
 		slog.Error("HandleREADAuth: error in HTTP request", slogor.Err(err))
 		return nil, fmt.Errorf("HandleREADAuth: error in HTTP request: %W", err)
@@ -241,7 +196,7 @@ func HandleREADAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Re
 	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err), "id", id)
-		return nil, fmt.Errorf("access token missing or not valid")
+		return nil, fmt.Errorf("processing the access token: %w", err)
 	}
 
 	// ***************************************************************************************
@@ -249,9 +204,6 @@ func HandleREADAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Re
 	// ***************************************************************************************
 
 	var tmfObject *TMFObject
-
-	// Retrieve the object, either from our local database or remotely if it does not yet exist.
-	// We need this so the rule engine can evaluate the policies using the data from the object.
 
 	slog.Debug("retrieving", "type", tmfType, "id", id)
 
@@ -267,128 +219,54 @@ func HandleREADAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Re
 		slog.Debug("object retrieved remotely", "id", id)
 	}
 
+	// Create a summary map object for the rules engine, to make rules simple to write
 	oMap := tmfObject.ContentMap
 	oMap["type"] = tmfObject.Type
 	oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
 
-	tmfArgument := StarTMFMap(oMap)
+	tmfObjectArgument := StarTMFMap(oMap)
 
 	// ****************************************************************************
 	// 4. Build the user object, combining info from the Access Token and the retrieved object.
 	// ****************************************************************************
 
-	userArgument := StarTMFMap{}
-
-	if tokString == "" {
-		userArgument["isAuthenticated"] = false
-		userArgument["isOwner"] = false
-		userArgument["country"] = ""
-		userArgument["organizationIdentifier"] = ""
-
-	} else {
-
-		userArgument["isAuthenticated"] = true
-
-		var isLEAR bool
-		if len(tokString) > 0 {
-
-			verifiableCredential := jpath.GetMap(tokenArgument, "vc")
-			if len(verifiableCredential) > 0 {
-				powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-				for _, p := range powers {
-					if jpath.GetString(p, "tmf_type") == "Domain" &&
-						jpath.GetString(p, "tmf_domain") == "DOME" &&
-						jpath.GetString(p, "tmf_function") == "Onboarding" &&
-						jpath.GetString(p, "tmf_action") == "Execute" {
-
-						isLEAR = true
-					}
-				}
-
-			} else {
-				verifiableCredential = jpath.GetMap(tokenArgument, "verifiableCredential")
-				powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-				for _, p := range powers {
-					if jpath.GetString(p, "tmfType") == "Domain" &&
-						jpath.GetString(p, "tmfDomain") == "DOME" &&
-						jpath.GetString(p, "tmfFunction") == "Onboarding" &&
-						jpath.GetString(p, "tmfAction") == "Execute" {
-
-						isLEAR = true
-					}
-				}
-
-			}
-			userArgument["isLEAR"] = isLEAR
-
-			// Get the organizationIdentifier of the user
-			userOrganizationIdentifier := jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.organizationIdentifier")
-
-			userArgument["organizationIdentifier"] = userOrganizationIdentifier
-
-			if userOrganizationIdentifier != "" && tmfObject != nil {
-				userArgument["isOwner"] = (userOrganizationIdentifier == tmfObject.OrganizationIdentifier)
-			}
-
-			userArgument["country"] = jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.country")
-
-		}
-
-	}
+	// The returned user object always exists.
+	// If the token was not provided or the user info does not exist, we get a default user object
+	// probably only useful for reading public information.
+	userArgument := parseUserInfo(tokString, tokenArgument)
 
 	// *********************************************************************************
 	// 5. Build the convenience data object from the usage terms embedded in the TMF object.
 	// *********************************************************************************
 
 	// We convert the complex structure into simple lists of countries and operator identifiers
-	permittedLegalRegions := getRestrictionElements(tmfArgument, "permittedLegalRegion")
-	tmfArgument["permittedCountries"] = permittedLegalRegions
+	permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
+	tmfObjectArgument["permittedCountries"] = permittedLegalRegions
 
-	prohibitedLegalRegions := getRestrictionElements(tmfArgument, "prohibitedLegalRegion")
-	tmfArgument["permittedCountries"] = prohibitedLegalRegions
+	prohibitedLegalRegions := getRestrictionElements(tmfObjectArgument, "prohibitedLegalRegion")
+	tmfObjectArgument["permittedCountries"] = prohibitedLegalRegions
 
-	permittedOperators := getRestrictionElements(tmfArgument, "permittedOperator")
-	tmfArgument["permittedCountries"] = permittedOperators
+	permittedOperators := getRestrictionElements(tmfObjectArgument, "permittedOperator")
+	tmfObjectArgument["permittedCountries"] = permittedOperators
 
-	prohibitedOperators := getRestrictionElements(tmfArgument, "prohibitedOperator")
-	tmfArgument["permittedCountries"] = prohibitedOperators
+	prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
+	tmfObjectArgument["permittedCountries"] = prohibitedOperators
 
 	// *********************************************************************************
 	// 6. Pass the request, the object and the user to the rules engine for a decision.
 	// *********************************************************************************
 
-	// Assemble all data in a single "input" argument, to the style of OPA.
-	// We mutate the predeclared identifier, so the policy can access the data for this request.
-	// We can also service possible callbacks from the rules engine.
-	input := StarTMFMap{
-		"request": requestArgument,
-		"token":   tokenArgument,
-		"tmf":     tmfArgument,
-		"user":    userArgument,
-	}
-
-	decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
-
-	// An error is considered a rejection
-	if err != nil {
-		slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
-		return nil, fmt.Errorf("not authorized: %w", err)
-	}
-
-	// The rules engine rejected the request
-	if !decision {
-		slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
-		return nil, fmt.Errorf("not authorized")
-	}
-
-	// The rules engine accepted the request, continue processing
-	slog.Info("Authorized Authorized")
+	userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, tmfObjectArgument, userArgument)
 
 	// *********************************************************************************
 	// 7. Reply to the caller with the object, if the rules engine did not deny the operation.
 	// *********************************************************************************
 
-	return tmfObject, nil
+	if userCanAccessObject {
+		return tmfObject, nil
+	} else {
+		return nil, fmt.Errorf("not authorized")
+	}
 }
 
 func getRestrictionElements(object any, concept string) []string {
@@ -422,27 +300,17 @@ func getRestrictionElements(object any, concept string) []string {
 }
 
 /*
-	HandleUPDATEAuth manages the update process of a TMForum object (the http PATH verb).
-
-The process is the following:
-1. Process the request and get the 'id' of the object to be updated from the path of the request.
-2. Get the organizationIdentifier of the user requesting the update operation.
-3. Retrieve the current object from the local cache. The object must exist in the cache,
-as long as any cloning operation was done recently, or the product was created after the
-most recent cloning operation via the  In other cases, a clone operation resolves the issue.
-4. Check that the user is the owner of the object, using the organizationIdentifier in it.
-5. Retrieve the object from the request body.
-6. Pass the request, the object and the user to the rules engine for a decision.
-7. Send the request to the central TMForum APIs, to update the object.
-8. Update the cache with the response and respond to the caller.
+HandleUPDATEAuth manages the update process of a TMForum object (the http PATH verb).
 */
-func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request) (*TMFObject, error) {
+func HandleUPDATEAuth(
+	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+) (*TMFObject, error) {
 
 	// ********************************************************************
-	// 1. Process the request and get the 'id' of the object to be updated from the path of the request.
+	// 1. Parse the request and get the 'id' of the object to be updated from the path of the request.
 	// ********************************************************************
 
-	requestArgument, err := processInputRequest(logger, r)
+	requestArgument, err := parseInputRequest(logger, r)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +318,7 @@ func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.
 	id := requestArgument["tmf_id"].(string)
 
 	// ******************************************************************************
-	// 2. Get the organizationIdentifier of the user requesting the update operation
+	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
 	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
@@ -459,17 +327,11 @@ func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.
 		return nil, fmt.Errorf("access token missing or not valid")
 	}
 
-	// Get the organizationIdentifier of the user
-	userOrganizationIdentifier := jpath.GetString(tokenArgument, "vc.credentialSubject.mandate.mandator.organizationIdentifier")
-
 	// ***************************************************************************************
 	// 3. Retrieve the current object from the local cache. The object must exist in the cache.
 	// ***************************************************************************************
 
 	var existingTmfObject *TMFObject
-
-	// Retrieve the object, either from our local database or remotely if it does not yet exist.
-	// We need this so the rule engine can evaluate the policies using the data from the object.
 
 	slog.Debug("retrieving", "type", tmfType, "id", id)
 
@@ -488,111 +350,54 @@ func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.
 	// 4. Check that the user is the owner of the object, using the organizationIdentifier in it.
 	// ****************************************************************************
 
-	if userOrganizationIdentifier != existingTmfObject.OrganizationIdentifier {
+	// The returned user object always exists.
+	// If the token was not provided or the user info does not exist, we get a default user object
+	// probably only useful for reading public information.
+	userArgument := parseUserInfo(tokString, tokenArgument)
+
+	// TODO: check that this "hard rule" applies to all objects, like an Order
+	userOrganizationIdentifier := userArgument["organizationIdentifier"].(string)
+	if userArgument["organizationIdentifier"].(string) != existingTmfObject.OrganizationIdentifier {
 		slog.Error("REJECTED: the user is not the owner", "user", userOrganizationIdentifier, "existing", existingTmfObject.OrganizationIdentifier)
 		return nil, fmt.Errorf("not authorized")
 	}
 
-	// ****************************************
-	// Set a simple User object from the received LEARCredential, so simple rules are simple to write.
-	// The user always has the full power by accessing the complete token object.
-
-	userArgument := StarTMFMap{}
-
-	// Setup some fields about the remote User
-	userArgument["organizationIdentifier"] = userOrganizationIdentifier
-
-	if userOrganizationIdentifier == "" || existingTmfObject == nil {
-		userArgument["isOwner"] = false
-	} else {
-		userArgument["isOwner"] = (userOrganizationIdentifier == existingTmfObject.OrganizationIdentifier)
-	}
-
-	var isLEAR bool
-	verifiableCredential := jpath.GetList(tokenArgument, "vc")
-	if len(verifiableCredential) == 0 {
-		verifiableCredential = jpath.GetList(tokenArgument, "verifiableCredential")
-	}
-	powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-	for _, p := range powers {
-		if jpath.GetString(p, "tmf_type") == "Domain" &&
-			jpath.GetString(p, "tmf_domain") == "DOME" &&
-			jpath.GetString(p, "tmf_function") == "Onboarding" &&
-			jpath.GetString(p, "tmf_action") == "Execute" {
-
-			isLEAR = true
-
-		}
-	}
-
-	userArgument["isLEAR"] = isLEAR
-
-	if tokString == "" {
-		userArgument["isAuthenticated"] = false
-	} else {
-		userArgument["isAuthenticated"] = true
-	}
-
-	userArgument["country"] = jpath.GetString(tokenArgument, "vc.credentialSubject.mandate.mandator.country")
-
 	// *******************************************************************************
-	// 5. Retrieve the object from the request body.
+	// 5. Retrieve the object from the request body, which will be used to update the existing one
 	// *******************************************************************************
 
-	oMap := StarTMFMap{}
+	incomingObjectArgument := StarTMFMap{}
 
-	body, err := io.ReadAll(r.Body)
+	requestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
-	if err := json.Unmarshal(body, &oMap); err != nil {
+	// Parse the request body into a StarTMFMap
+	if err := json.Unmarshal(requestBody, &incomingObjectArgument); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// Set the user as the owner in the object being written
-	oMap["organizationIdentifier"] = userOrganizationIdentifier
+	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
-	slog.Debug("creating", "type", tmfType)
-
-	tmfArgument := StarTMFMap(oMap)
+	slog.Debug("updating", "type", tmfType)
 
 	// *********************************************************************************
-	// 6. Pass the request, the object and the user to the rules engine for a decision.
+	// 6. Check if the user can perform the operation on the object.
 	// *********************************************************************************
 
-	// Assemble all data in a single "input" argument, to the style of OPA.
-	// We mutate the predeclared identifier, so the policy can access the data for this request.
-	// We can also service possible callbacks from the rules engine.
-	input := StarTMFMap{
-		"request": requestArgument,
-		"token":   tokenArgument,
-		"tmf":     tmfArgument,
-		"user":    userArgument,
-	}
-
-	decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
-
-	// An error is considered a rejection
-	if err != nil {
-		slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
-		return nil, fmt.Errorf("not authorized: %w", err)
-	}
-
-	// The rules engine rejected the request
-	if !decision {
-		slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
+	userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, incomingObjectArgument, userArgument)
+	if !userCanAccessObject {
 		return nil, fmt.Errorf("not authorized")
 	}
-
-	// The rules engine accepted the request, continue processing
-	slog.Info("Authorized Authorized")
 
 	// **********************************************************************************
 	// 7. Send the request to the central TMForum APIs, to update the object.
 	// **********************************************************************************
 
-	remotepo, err := doPATCH(tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, body)
+	// We pass the same authorization token as the one we received from the caller
+	remotepo, err := doPATCH(tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, requestBody)
 	if err != nil {
 		slog.Error("pdp: performing PATCH", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
@@ -609,7 +414,7 @@ func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.
 	// 8. Update the cache with the response and respond to the caller.
 	// **********************************************************************************
 
-	// Insert the object in the local database
+	// Update the object in the local database
 	err = tmf.UpsertTMFObject(nil, remotepo)
 	if err != nil {
 		slog.Error("pdp: update local cache", slogor.Err(err))
@@ -619,255 +424,181 @@ func HandleUPDATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.
 	return remotepo, nil
 }
 
-func HandleCREATEAuth(logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request) (*TMFObject, error) {
+func HandleCREATEAuth(
+	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+) (*TMFObject, error) {
 
-	// **********************************************
-	// Process the http.Request
+	// ********************************************************************
+	// 1. Parse the HTTP request.
+	// ********************************************************************
 
-	// To facilitate writing the rules, the object passed to the engine will be composed of:
-	// - Some relevant fields of the received http.Request
-	// - Some fields of the Access Token
-	//
-	// Some of the values come in special header fields set by the reverse proxy or any other component requesting authorization.
-	// These are the ones we use, with notation from NGINX:
-	// - X-Original-URI $request_uri;
-	// - X-Original-Method $request_method
-	// - X-Original-Remote-Addr $remote_addr;
-	// - X-Original-Host $host;
-
-	// X-Original-URI is compulsory
-	request_uri := r.Header.Get("X-Original-URI")
-	if len(request_uri) == 0 {
-		slog.Error("X-Original-URI missing")
-		return nil, fmt.Errorf("X-Original-URI missing")
-	}
-
-	reqURL, err := url.ParseRequestURI(request_uri)
+	requestArgument, err := parseInputRequest(logger, r)
 	if err != nil {
-		slog.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
-		return nil, fmt.Errorf("X-Original-URI invalid: %W", err)
+		return nil, err
 	}
+	tmfType := requestArgument["tmf_entity"].(string)
 
-	// X-Original-Method is compulsory and must be POST
-	original_method := r.Header.Get("X-Original-Method")
-	if original_method != "POST" {
-		slog.Error("X-Original-Method missing or invalid")
-		return nil, fmt.Errorf("X-Original-Method missing or invalid")
-	}
+	// ******************************************************************************
+	// 2. Process the Access Token if it comes with the request
+	// ******************************************************************************
 
-	logger.Info("POSTAuthorization", "URI", request_uri)
-
-	// The Request elements will be represented to Starlark scripts as a StarTMFMap
-
-	// Enrich the request object: "action: CREATE" is a synonym for the http method POST
-	requestArgument := StarTMFMap{
-		"action":      "CREATE",
-		"host":        r.Header.Get("X-Original-Host"),
-		"method":      r.Header.Get("X-Original-Method"),
-		"remote_addr": r.Header.Get("X-Original-Remote-Addr"),
-	}
-
-	// In DOME, the TMForum API paths have the following structure:
-	// - "GET /{prefix}/{object_type}?list_of_params" for retrieving a list of objects.
-	// - "GET /{prefix}/{object_type}/{object_id}?list_of_params" for retrieving one object.
-	//
-	// To simplify writing rules, we pass the following:
-	// - The raw path as a list of path components among the '/' separator.
-	// - The interpreted components of the path for TMForum APIs in DOME
-	stripped := strings.Trim(reqURL.Path, "/")
-	request_uri_parts := strings.Split(stripped, "/")
-	if len(request_uri_parts) != 2 {
-		slog.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
-		return nil, fmt.Errorf("X-Original-URI invalid")
-	}
-
-	// To simplify processing by rules, the path is converted to a list of path segments
-	var elems []st.Value
-	for _, v := range request_uri_parts {
-		elems = append(elems, st.String(v))
-	}
-	requestArgument["path"] = StarTMFList(elems)
-
-	// In DOME, the type of object is the second path component
-	tmfType := request_uri_parts[1]
-
-	requestArgument["tmf_entity"] = tmfType
-
-	// The query, as a list of properties
-	queryValues, err := parseQuery(reqURL.RawQuery)
+	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
-		return nil, fmt.Errorf("malformed URI: %w", err)
-	}
-	requestArgument["query"] = queryValues
-
-	// **********************************************
-	// Process the Access Token
-
-	// Retrieve the Access Token from the request.
-	// For writing, the access token must exist and be valid.
-	// The capabilities of the user to create an object or not are delegated to the rules engine.
-	tokString := tokenFromHeader(r)
-
-	if tokString == "" {
-		slog.Error("access token missing")
-		return nil, fmt.Errorf("access token missing")
+		slog.Error("HandleUPDATEAuth", slogor.Err(err))
+		return nil, fmt.Errorf("access token missing or not valid")
 	}
 
-	// Just some logs
-	slog.Debug("Access Token found")
-
-	// Verify the token and extract the claims.
-	// A verification error stops processing.
-
-	var tokClaims map[string]any
-	tokClaims, _, err = ruleEngine.getClaimsFromToken(tokString)
-	if err != nil {
-		slog.Error("invalid access token", slogor.Err(err), "token", tokString)
-		return nil, fmt.Errorf("invalid request: %w", err)
+	// We do not allow a CREATE request to come without authorization info
+	if len(tokString) == 0 {
+		return nil, fmt.Errorf("not authorized")
 	}
 
-	tokenArgument := StarTMFMap(tokClaims)
+	// ****************************************************************************
+	// 4. Retrieve the user sending the request.
+	// ****************************************************************************
 
-	// Get the organizationIdentifier of the user
-	userOrganizationIdentifier := jpath.GetString(tokClaims, "vc.credentialSubject.mandate.mandator.organizationIdentifier")
+	// The returned user object always exists.
+	// If the token was not provided or the user info does not exist, we get a default user object
+	// probably only useful for reading public information.
+	userArgument := parseUserInfo(tokString, tokenArgument)
 
-	// **********************************************
-	// Retrieve the TMForum object from the body of the request, to make it available to the rules engine for making the decision
+	// For a CREATE request, the user requires an organizationIdentifier
+	userOrganizationIdentifier := userArgument["organizationIdentifier"].(string)
+	if len(userOrganizationIdentifier) == 0 {
+		slog.Error("REJECTED: no user organization identifier", "user", userArgument)
+		return nil, fmt.Errorf("not authorized")
+	}
 
-	oMap := StarTMFMap{}
+	// *******************************************************************************
+	// 5. Retrieve the object from the request body, which will be used to update the existing one
+	// *******************************************************************************
 
-	body, err := io.ReadAll(r.Body)
+	incomingObjectArgument := StarTMFMap{}
+
+	incomingRequestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
-	if err := json.Unmarshal(body, &oMap); err != nil {
+	// Parse the request body into a StarTMFMap
+	if err := json.Unmarshal(incomingRequestBody, &incomingObjectArgument); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
 	// Perform some minimal checking. The real validation will be performed by TMForum implementation
-	if len(oMap["name"].(string)) == 0 ||
-		len(oMap["version"].(string)) == 0 ||
-		len(oMap["lifecycleStatus"].(string)) == 0 {
+	if len(incomingObjectArgument["name"].(string)) == 0 ||
+		len(incomingObjectArgument["version"].(string)) == 0 ||
+		len(incomingObjectArgument["lifecycleStatus"].(string)) == 0 {
+
+		slog.Error("either name, version or lifecycleStatus is missing in the request body")
 		return nil, fmt.Errorf("invalid TMF object")
 	}
 
 	// Set the user as the owner in the object being written
-	oMap["organizationIdentifier"] = userOrganizationIdentifier
+	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
 	slog.Debug("creating", "type", tmfType)
 
-	tmfArgument := StarTMFMap(oMap)
+	// *********************************************************************************
+	// 6. Check if the user can perform the operation on the object.
+	// *********************************************************************************
 
-	// ****************************************
-	// Set a simple User object from the received LEARCredential, so simple rules are simple to write.
-	// The user always has the full power by accessing the complete token object.
-
-	userArgument := StarTMFMap{}
-
-	// Setup some fields about the remote User
-	userArgument["organizationIdentifier"] = userOrganizationIdentifier
-
-	var isLEAR bool
-	verifiableCredential := jpath.GetList(tokClaims, "vc")
-	if len(verifiableCredential) == 0 {
-		verifiableCredential = jpath.GetList(tokClaims, "verifiableCredential")
-	}
-	powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-	for _, p := range powers {
-		if jpath.GetString(p, "tmf_type") == "Domain" &&
-			jpath.GetString(p, "tmf_domain") == "DOME" &&
-			jpath.GetString(p, "tmf_function") == "Onboarding" &&
-			jpath.GetString(p, "tmf_action") == "Execute" {
-
-			isLEAR = true
-
-		}
-	}
-
-	userArgument["isLEAR"] = isLEAR
-
-	userArgument["country"] = jpath.GetString(tokClaims, "vc.credentialSubject.mandate.mandator.country")
-
-	// Assemble all data in a single "input" argument, to the style of OPA.
-	// We mutate the predeclared identifier, so the policy can access the data for this request.
-	// We can also service possible callbacks from the rules engine.
-	input := StarTMFMap{
-		"request": requestArgument,
-		"token":   tokenArgument,
-		"tmf":     tmfArgument,
-		"user":    userArgument,
-	}
-
-	// ******************************************************************
-	// Ask the rules engine for an authorization decision on this request
-	decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
-
-	// An error is considered a rejection
-	if err != nil {
-		slog.Error("REJECTED REJECTED REJECTED 0000000000000000000000", slogor.Err(err))
-		return nil, fmt.Errorf("not authorized: %w", err)
-	}
-
-	// The rules engine rejected the request
-	if !decision {
-		slog.Warn("REJECTED REJECTED REJECTED 0000000000000000000000")
+	userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, incomingObjectArgument, userArgument)
+	if !userCanAccessObject {
 		return nil, fmt.Errorf("not authorized")
 	}
 
-	// The rules engine accepted the request, return it to the caller
-	slog.Info("Authorized Authorized")
+	// **********************************************************************************
+	// 7. Send the request to the central TMForum APIs, to update the object.
+	// **********************************************************************************
 
-	// Send the request to the TMForum server
-
-	out, err := json.Marshal(oMap)
+	// Use the updated incoming object for the outgoing request
+	outgoingRequestBody, err := json.Marshal(incomingObjectArgument)
 	if err != nil {
 		return nil, err
 	}
 
-	buf := bytes.NewReader(out)
-
-	// Send the request to the server
-	res, err := http.Post(tmf.Server()+r.URL.Path, "application/json", buf)
+	// Send the POST to the central server.
+	// A POST in TMForum does not reply with any data.
+	_, err = doPOST(tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, outgoingRequestBody)
 	if err != nil {
-		slog.Error("retrieving remote", "object", r.URL.Path, slogor.Err(err))
-		return nil, err
-	}
-	body, err = io.ReadAll(res.Body)
-	res.Body.Close()
-	if res.StatusCode > 299 {
-		return nil, fmt.Errorf("retrieving object, status code: %d and\nbody: %s", res.StatusCode, body)
-	}
-	if err != nil {
-		slog.Error(err.Error())
-		return nil, err
+		slog.Error("pdp: performing POST", slogor.Err(err))
+		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
-	// Convert the JSON response to a map
-	oMap = StarTMFMap{}
-	err = json.Unmarshal(body, &oMap)
-	if err != nil {
-		slog.Error(err.Error())
-		return nil, err
-	}
+	// **********************************************************************************
+	// 8. Update the cache with the object and respond to the caller.
+	// **********************************************************************************
 
-	// Just in case, set the OrganizationIdentifier
-	oMap["organizationIdentifier"] = userOrganizationIdentifier
-
-	// Create a TMFObject struct from the map
-	po, err := NewTMFObject(oMap, nil)
+	tmfObject, err := NewTMFObject(incomingObjectArgument, nil)
 	if err != nil {
 		slog.Error(err.Error())
 		return nil, err
 	}
 
 	// Insert the object in the local database
-	err = tmf.UpsertTMFObject(nil, po)
+	err = tmf.UpsertTMFObject(nil, tmfObject)
+	if err != nil {
+		slog.Error("pdp: update local cache", slogor.Err(err))
+		return nil, fmt.Errorf("not authorized: %w", err)
+	}
+
+	return tmfObject, nil
+}
+
+func doPOST(url string, auth_token string, organizationIdentifier string, requestBody []byte) (*TMFObject, error) {
+
+	buf := bytes.NewReader(requestBody)
+
+	// This is a POST
+	req, err := http.NewRequest("POST", url, buf)
 	if err != nil {
 		return nil, err
 	}
 
-	return po, nil
+	// Set the headers for the outgoing request, including the authorization token
+	req.Header.Set("X-Organization", organizationIdentifier)
+	req.Header.Set("Authorization", "Bearer "+auth_token)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("content-type", "application/json")
+
+	// Send the request
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("sending request", "object", url, slogor.Err(err))
+		return nil, err
+	}
+
+	// Get the reply body and check possible return errors
+	replyBody, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		slog.Error(err.Error())
+		return nil, fmt.Errorf("failed to read body: %w", err)
+	}
+
+	if res.StatusCode > 299 {
+		slog.Error("retrieving object", "status code", res.StatusCode)
+		return nil, fmt.Errorf("retrieving object, status: %d", res.StatusCode)
+	}
+
+	// Create a TMFObject struct from the body
+	var oMap = map[string]any{}
+	err = json.Unmarshal(replyBody, &oMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Just in case, set the OrganizationIdentifier
+	oMap["organizationIdentifier"] = organizationIdentifier
+
+	tmfObject, err := NewTMFObject(oMap, nil)
+	if err != nil {
+		slog.Error(err.Error())
+		return nil, err
+	}
+
+	return tmfObject, nil
 }
 
 // parseQuery returns the query part of the request as a StarTMFMap.
@@ -994,13 +725,13 @@ func doPATCH(url string, auth_token string, organizationIdentifier string, reque
 	return po, nil
 }
 
-var validMethods = map[string]string{
+var httpMethodAliases = map[string]string{
 	"GET":   "READ",
 	"POST":  "CREATE",
 	"PATCH": "UPDATE",
 }
 
-// processInputRequest converts the HTTP request into a StarTMFMap, processing the X-Original headers.
+// parseInputRequest converts the HTTP request into a StarTMFMap, processing the X-Original headers.
 //
 // To facilitate writing the rules, the StarTMFMap object will be composed of:
 // - Some relevant fields of the received http.Request
@@ -1013,7 +744,7 @@ var validMethods = map[string]string{
 // - X-Original-Method $request_method
 // - X-Original-Remote-Addr $remote_addr;
 // - X-Original-Host $host;
-func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) {
+func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) {
 
 	// X-Original-URI is compulsory
 	request_uri := r.Header.Get("X-Original-URI")
@@ -1030,7 +761,7 @@ func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, erro
 
 	// X-Original-Method is compulsory
 	original_method := r.Header.Get("X-Original-Method")
-	method_alias, found := validMethods[original_method]
+	methodAlias, found := httpMethodAliases[original_method]
 	if !found {
 		logger.Error("X-Original-Method missing or invalid", "method", original_method)
 		return nil, fmt.Errorf("X-Original-Method missing or invalid: %v", original_method)
@@ -1042,7 +773,7 @@ func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, erro
 
 	// Enrich the request object: "action" is a synonym for the http method received
 	requestArgument := StarTMFMap{
-		"action":      method_alias,
+		"action":      methodAlias,
 		"host":        r.Header.Get("X-Original-Host"),
 		"method":      r.Header.Get("X-Original-Method"),
 		"remote_addr": r.Header.Get("X-Original-Remote-Addr"),
@@ -1061,8 +792,8 @@ func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, erro
 	stripped := strings.Trim(reqURL.Path, "/")
 	request_uri_parts := strings.Split(stripped, "/")
 
-	// We must have either 2 or 3 components for a LIST or GET, respectively
-	if len(request_uri_parts) != 2 && len(request_uri_parts) != 3 {
+	// We must have 2 or more components
+	if len(request_uri_parts) < 2 {
 		logger.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
 		return nil, fmt.Errorf("X-Original-URI invalid")
 	}
@@ -1084,9 +815,9 @@ func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, erro
 	// In DOME, the type of object is the second path component
 	requestArgument["tmf_entity"] = request_uri_parts[1]
 
-	// In DOME, the identifier of the object is the third path component, got a request for a single object
-	if len(request_uri_parts) == 3 {
-		requestArgument["tmf_id"] = request_uri_parts[2]
+	// In DOME, the identifier of the object is the last path component
+	if len(request_uri_parts) >= 3 {
+		requestArgument["tmf_id"] = request_uri_parts[len(request_uri_parts)-1]
 	}
 
 	// The query, as a list of properties
@@ -1105,7 +836,12 @@ func processInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, erro
 //
 // The access token may not exist, but if verification is requested, then it must exist and must be valid.
 // If verification is not requested, a nil tokenArgument is returned without an error.
-func processAccessToken(logger *slog.Logger, ruleEngine *PDP, r *http.Request, verify bool) (tokString string, tokenArgument StarTMFMap, err error) {
+func processAccessToken(
+	logger *slog.Logger,
+	ruleEngine *PDP,
+	r *http.Request,
+	verify bool,
+) (tokString string, tokenArgument StarTMFMap, err error) {
 
 	tokString = tokenFromHeader(r)
 
@@ -1129,4 +865,99 @@ func processAccessToken(logger *slog.Logger, ruleEngine *PDP, r *http.Request, v
 	tokenArgument = StarTMFMap(tokClaims)
 	return tokString, tokenArgument, nil
 
+}
+
+func parseUserInfo(tokString string, tokenArgument StarTMFMap) StarTMFMap {
+
+	// Create the user with default values
+	userArgument := StarTMFMap{
+		"isAuthenticated":        false,
+		"isLEAR":                 false,
+		"isOwner":                false,
+		"country":                "",
+		"organizationIdentifier": "",
+	}
+
+	if len(tokString) > 0 {
+
+		userArgument["isAuthenticated"] = true
+
+		var isLEAR bool
+
+		verifiableCredential := jpath.GetMap(tokenArgument, "vc")
+		if len(verifiableCredential) > 0 {
+			powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
+			for _, p := range powers {
+				if jpath.GetString(p, "type") == "Domain" &&
+					jpath.GetString(p, "domain") == "DOME" &&
+					jpath.GetString(p, "function") == "Onboarding" &&
+					jpath.GetString(p, "action") == "execute" {
+
+					isLEAR = true
+				}
+			}
+
+		} else {
+			// This is to support old-format Verifiable Credentials
+			verifiableCredential = jpath.GetMap(tokenArgument, "verifiableCredential")
+			powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
+			for _, p := range powers {
+				if jpath.GetString(p, "type") == "Domain" &&
+					jpath.GetString(p, "domain") == "DOME" &&
+					jpath.GetString(p, "function") == "Onboarding" &&
+					jpath.GetString(p, "action") == "execute" {
+
+					isLEAR = true
+				}
+			}
+
+		}
+		userArgument["isLEAR"] = isLEAR
+
+		// Get the organizationIdentifier of the user
+		userOrganizationIdentifier := jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.organizationIdentifier")
+
+		userArgument["organizationIdentifier"] = userOrganizationIdentifier
+
+		userArgument["country"] = jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.country")
+
+	}
+
+	return userArgument
+}
+
+func takeDecision(
+	ruleEngine *PDP,
+	requestArgument StarTMFMap,
+	tokenArgument StarTMFMap,
+	tmfArgument StarTMFMap,
+	userArgument StarTMFMap,
+) bool {
+	// Assemble all data in a single "input" argument, to the style of OPA.
+	// We mutate the predeclared identifier, so the policy can access the data for this request.
+	// We can also service possible callbacks from the rules engine.
+	input := StarTMFMap{
+		"request": requestArgument,
+		"token":   tokenArgument,
+		"tmf":     tmfArgument,
+		"user":    userArgument,
+	}
+
+	decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
+
+	// An error is considered a rejection, continue with the next candidate object
+	if err != nil {
+		slog.Error("!!!!!! REJECTED due to an error", slogor.Err(err))
+		return false
+	}
+
+	// The rules engine rejected the request, continue with the next candidate object
+	if !decision {
+		slog.Warn("!!!!!! REJECTED due to policy")
+		return false
+	}
+
+	// The rules engine accepted the request, add the object to the final list
+	slog.Info("PDP Authorized the request")
+	return true
 }

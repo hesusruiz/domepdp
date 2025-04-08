@@ -46,7 +46,7 @@ func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool
 	// Set some middleware, for recovery of panics in the routes and for logging all requests
 	handler = PanicHandler(handler)
 
-	// An HTTP server with sane defaults
+	// An HTTP server with sensible defaults
 	s := &http.Server{
 		Addr:           pdpAddress,
 		ReadTimeout:    10 * time.Second,
@@ -55,61 +55,48 @@ func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool
 		Handler:        handler,
 	}
 
-	// Return the group run functions: one for starting the server and another for shutting it down
-	return tmfConfig,
-		func() error {
+	// This function will start the server
+	startServer := func() error {
 
-			// Start a cloning process immediately
-			slog.Info("started cloning", "time", time.Now().String())
-			slog.Info("Starting PDP and TMForum API server", "addr", pdpAddress)
-			slog.Info("finished cloning", "time", time.Now().String())
+		// Start a cloning process immediately
+		slog.Info("started cloning", "time", time.Now().String())
+		slog.Info("Starting PDP and TMForum API server", "addr", pdpAddress)
+		slog.Info("finished cloning", "time", time.Now().String())
 
-			// Start a backgroud process to clone the database every 10 minutes
-			go func() {
+		// Start a backgroud process to clone the database every 10 minutes
+		go func() {
+			tmf.CloneRemoteProductOfferings()
+			c := time.Tick(10 * time.Minute)
+			for next := range c {
+				slog.Info("started cloning", "time", next.String())
 				tmf.CloneRemoteProductOfferings()
-				c := time.Tick(10 * time.Minute)
-				for next := range c {
-					slog.Info("started cloning", "time", next.String())
-					tmf.CloneRemoteProductOfferings()
-					slog.Info("finished cloning", "time", time.Now().String())
-				}
-			}()
-
-			if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				return err
+				slog.Info("finished cloning", "time", time.Now().String())
 			}
-			return nil
+		}()
 
-		}, func(error) {
-			tmf.Close()
-			slog.Info("Cancelling the HTTP server")
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			s.Shutdown(ctx)
-		},
-		nil
+		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+
+	}
+
+	// And this will stop the server
+	stopServer := func(error) {
+		tmf.Close()
+		slog.Info("Cancelling the HTTP server")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s.Shutdown(ctx)
+	}
+
+	// Return the group run functions: one for starting the server and another for shutting it down
+	return tmfConfig, startServer, stopServer, nil
 
 }
 
 // PanicHandler is a simple http handler for recovering panics in downstream handlers
 func PanicHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if err := recover(); err != nil {
-				buf := make([]byte, 2048)
-				n := runtime.Stack(buf, false)
-				buf = buf[:n]
-
-				fmt.Printf("panic recovered: %v\n %s", err, buf)
-				errorTMF(w, http.StatusInternalServerError, "unknown error", "unknown error")
-			}
-		}()
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-func DefaultSecureHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {

@@ -11,8 +11,9 @@ type Config struct {
 	// Listen is the address to listen on, e.g. ":443".
 	Listen string
 
-	CaCertFile string
-	CaKeyFile  string
+	CaCertFile    string
+	CaKeyFile     string
+	ProxyPassword string
 
 	HostTargets []string
 }

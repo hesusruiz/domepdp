@@ -279,6 +279,7 @@ func Get(src any, path string) (any, error) {
 			srcKind := reflect.TypeOf(src).Kind()
 			srcValue := reflect.ValueOf(src)
 
+			// This is a type backed by a Map
 			if srcKind == reflect.Map {
 				newValue := srcValue.MapIndex(reflect.ValueOf(pathComponent))
 
@@ -291,6 +292,7 @@ func Get(src any, path string) (any, error) {
 				continue
 			}
 
+			// And this is a Slice
 			if srcKind == reflect.Slice {
 				index64, err := strconv.ParseInt(pathComponent, 10, 0)
 				if err != nil {

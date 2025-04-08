@@ -15,12 +15,15 @@ type Environment int
 
 const DOME_PRO Environment = 0
 const DOME_DEV2 Environment = 1
+const DOME_LCL Environment = 2
 
-const DEV2_DOMEServer = "https://dome-marketplace-dev2.org"
 const PRO_DOMEServer = "https://dome-marketplace.eu"
+const DEV2_DOMEServer = "https://dome-marketplace-dev2.org"
+const LCL_DOMEServer = "https://dome-marketplace-lcl.org"
 
-const DEV2_dbname = "./tmf-dev2.db"
 const PRO_dbname = "./tmf.db"
+const DEV2_dbname = "./tmf-dev2.db"
+const LCL_dbname = "./tmf-lcl.db"
 
 type Config struct {
 	Environment Environment
@@ -58,6 +61,10 @@ var DEV2HostTargets = []string{
 	"dome-marketplace-dev2.org",
 }
 
+var LCLHostTargets = []string{
+	"dome-marketplace-lcl.org",
+}
+
 func DefaultConfig(where Environment) *Config {
 	conf := &Config{Environment: where}
 
@@ -72,6 +79,12 @@ func DefaultConfig(where Environment) *Config {
 		conf.HostTargets = PROHostTargets
 		conf.DomeServer = PRO_DOMEServer
 		conf.Dbname = PRO_dbname
+
+	} else if where == DOME_LCL {
+
+		conf.HostTargets = LCLHostTargets
+		conf.DomeServer = LCL_DOMEServer
+		conf.Dbname = LCL_dbname
 
 	} else {
 

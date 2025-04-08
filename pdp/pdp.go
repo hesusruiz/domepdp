@@ -33,7 +33,7 @@ import (
 
 func init() {
 	// Add our built-ins to the Starlark Universe dictionary before any evaluation begins.
-	// All values here must be immutable and shared among all instances of the
+	// All values here must be immutable and shared among all instances.
 	// See here for the standard Starlark entities:
 	// https://github.com/google/starlark-go/blob/master/doc/spec.md#built-in-constants-and-functions
 
@@ -54,7 +54,7 @@ func init() {
 
 }
 
-// Decision can be Authenticate or Authorize
+// We may request decisions to Authenticate or to Authorize
 type Decision int
 
 const Authenticate Decision = 1
@@ -121,7 +121,7 @@ func NewPDP(environment Environment,
 	}
 
 	if verificationKeyFunc == nil {
-		m.verificationKeyFun = defaultVerificationKey
+		m.verificationKeyFun = m.defaultVerificationKey
 	} else {
 		m.verificationKeyFun = verificationKeyFunc
 	}
@@ -131,7 +131,7 @@ func NewPDP(environment Environment,
 	var err error
 	m.verifierJWK, err = m.verificationKeyFun(environment)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error retrieving verification key: %w", err)
 	}
 
 	// Create the pool of parsed and compiled Starlark policy rules.
@@ -152,7 +152,7 @@ func NewPDP(environment Environment,
 // defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
 //
 // It receives the runtime environment, enabling a different mechanism depending on it.
-func defaultVerificationKey(environment Environment) (*jose.JSONWebKey, error) {
+func (m *PDP) defaultVerificationKey(environment Environment) (*jose.JSONWebKey, error) {
 
 	// Retrieve the OpenID configuration from the Verifier
 	oid, err := NewOpenIDConfig(environment)
@@ -162,13 +162,21 @@ func defaultVerificationKey(environment Environment) (*jose.JSONWebKey, error) {
 
 	// Use the link in the OpenID config to retrieve the key from the Verifier.
 	// In DOME, we use the first key from the keyset retrieved.
-	verifierJWK, err := oid.VerificationJWK()
+	m.verifierJWK, err = oid.VerificationJWK()
 	if err != nil {
 		return nil, err
 	}
 
-	return verifierJWK, nil
+	return m.verifierJWK, nil
 
+}
+
+func (m *PDP) VerificationJWK() (key *jose.JSONWebKey, err error) {
+	if m.verifierJWK == nil {
+		m.verifierJWK, err = m.verificationKeyFun(m.environment)
+		return m.verifierJWK, err
+	}
+	return m.verifierJWK, nil
 }
 
 // threadEntry represents the pool of Starlark threads for policy rules execution.
@@ -512,7 +520,7 @@ func (m *PDP) TakeAuthnDecision(decision Decision, input StarTMFMap) (bool, erro
 
 	te := ent.(*threadEntry)
 	if te == nil {
-		return false, fmt.Errorf("getting a thread entry from pool")
+		return false, fmt.Errorf("invalid entry type in the pool")
 	}
 
 	// We mutate the predeclared identifier, so the policy can access the data for this request.
@@ -922,7 +930,7 @@ func softHashString(s string) uint32 {
 	return h
 }
 
-// getClaimsFromRequest verifies the Access Token received with the request, and extracts the claims in its payload.
+// getClaimsFromToken verifies the Access Token received with the request, and extracts the claims in its payload.
 // The most important claim in the payload is the LEARCredential that was used for authentication.
 func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found bool, err error) {
 	var token *jwt.Token
@@ -932,19 +940,19 @@ func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found
 		return nil, false, nil
 	}
 
-	verifierPublicKeyFunc := func(*jwt.Token) (interface{}, error) {
-		if m.verifierJWK == nil {
-			slog.Error("verifierJWK not initialized")
-			return nil, fmt.Errorf("verifierJWK not initialized")
+	verifierPublicKeyFunc := func(*jwt.Token) (any, error) {
+		vk, err := m.VerificationJWK()
+		if err != nil {
+			return nil, err
 		}
-		slog.Debug("publicKeyFunc", "key", m.verifierJWK)
-		return m.verifierJWK.Key, nil
+		slog.Debug("publicKeyFunc", "key", vk)
+		return vk.Key, nil
 	}
 
 	// Validate and verify the token
 	token, err = jwt.NewParser().ParseWithClaims(tokString, &theClaims, verifierPublicKeyFunc)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("error parsing token: %w", err)
 	}
 
 	jwtmapClaims := token.Claims.(*MapClaims)

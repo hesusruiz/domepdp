@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hesusruiz/domeproxy/tmfapi"
 	"github.com/smarty/cproxy/v2"
 	"gitlab.com/greyxor/slogor"
 )
@@ -43,7 +44,15 @@ import (
 func MITMServerHandler(
 	config *Config,
 	pdpServer string,
-) (execute func() error, interrupt func(error)) {
+) (execute func() error, interrupt func(error), err error) {
+
+	// Read the passworf file
+	p, err := os.ReadFile(config.ProxyPassword)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading proxy password file: %w", err)
+	}
+
+	password := strings.TrimSpace(string(p))
 
 	// This is the man-in-the-middle proxy that will intercept the requests to the TMF APIs, so they can be served locally from the
 	// local database, or updated if the local copy is not fresh anymore.
@@ -62,6 +71,7 @@ func MITMServerHandler(
 	// This HTTP handler will receive all requests and each one will be dispatched to the appropriate type of proxy.
 	rh := &roothandler{
 		mitmProxy:        mitmProxy,
+		proxyPassword:    password,
 		transparentProxy: transparentProxy,
 		hostTargets:      config.HostTargets,
 	}
@@ -84,25 +94,26 @@ func MITMServerHandler(
 			defer cancel()
 			s.Shutdown(ctx)
 			fmt.Println("MITM proxy cancelled")
-		}
-
+		},
+		nil
 }
 
 // The main handler for the proxy server.
 
 type roothandler struct {
 	mitmProxy        *mitmProxy
+	proxyPassword    string
 	transparentProxy http.Handler
 	hostTargets      []string
 }
 
 func (h *roothandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
-	// The proxy is authentiated and we do not allow any other request to pass through
+	// The proxy is authenticated and we do not allow any other request to pass through
 	// Check for proxy authentication in the Proxy-Authorization request header
 	proxyAuthHeader := r.Header.Get("Proxy-Authorization")
 	if len(proxyAuthHeader) == 0 {
-		// log.Printf("REJECTED (no proxy auth header): Method: %s, Host: %s, URL: %s, IP: %s\n", r.Method, r.Host, r.URL, r.RemoteAddr)
+		// We do not log here due to the Internet background noise ...
 		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy Authentication Required\"")
 		http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 		return
@@ -129,7 +140,7 @@ func (h *roothandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	username := usernamePassword[0]
 	password := usernamePassword[1]
-	if username != "warped" || password != "eueyeh37372309kwe+==3" {
+	if username != "warped" || password != h.proxyPassword {
 		slog.Error("REJECTED (invalid username/password)", "Method", r.Method, "Host", r.Host, "URL", r.URL, "IP", r.RemoteAddr)
 		http.Error(w, "Invalid username/password", http.StatusUnauthorized)
 		return
@@ -294,26 +305,10 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		var resp *http.Response
 
 		// We will intercept the requests to the TMForum APIs
-		// TODO: use a proper routing table
-		if strings.HasPrefix(r.URL.Path, "/catalog/category/") ||
-
-			strings.HasPrefix(r.URL.Path, "/catalog/catalog") ||
-			strings.HasPrefix(r.URL.Path, "/catalog/category") ||
-			strings.HasPrefix(r.URL.Path, "/catalog/productOffering") ||
-
-			strings.HasPrefix(r.URL.Path, "/catalog/productOffering/") ||
-			strings.HasPrefix(r.URL.Path, "/catalog/productSpecification/") ||
-			strings.HasPrefix(r.URL.Path, "/catalog/productOfferingPrice/") ||
-
-			strings.HasPrefix(r.URL.Path, "/service/serviceSpecification/") ||
-
-			strings.HasPrefix(r.URL.Path, "/resource/resourceSpecification/") ||
-
-			strings.HasPrefix(r.URL.Path, "/party/organization/") {
+		if tmfapi.PrefixInRequest(r.URL.Path) {
 
 			// Take the original request and change its destination to be forwarded
-			// to the target server.
-
+			// to the PDP server.
 			targetUrl, err := url.Parse(p.pdpServer)
 			if err != nil {
 				slog.Error("## MITM LOCAL", slogor.Err(err), "URL", r.URL)
@@ -323,6 +318,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 			targetUrl.Path = r.URL.Path
 			targetUrl.RawQuery = r.URL.RawQuery
 			r.URL = targetUrl
+
 			// Make sure this is unset for sending the request through a client
 			r.RequestURI = ""
 
@@ -349,10 +345,10 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 				return
 			}
 
-			// Send the request to the target server and log the response.
-			// log.Printf("<<<>>> REQUEST %s\n", r.URL)
+			// Disable following redirects, because we want to see the 302 responses
 			http.DefaultClient.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
 
+			// Send the request to the target server.
 			resp, err = http.DefaultClient.Do(r)
 			if err != nil {
 				slog.Error(">> MITM FORWARDED sending request", "host", proxyReq.Host, "URL", r.URL, slogor.Err(err))
@@ -360,6 +356,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 				return
 			}
 
+			// Reply to the client with the response from the target server.
 			slog.Info(">> MITM FORWARDED", "URL", r.URL, "status", resp.Status)
 			sendReply(tlsConn, resp)
 

@@ -44,8 +44,6 @@ PRAGMA journal_mode = WAL;
 CREATE INDEX IF NOT EXISTS idx_hash ON tmfobject (hash);
 `
 
-const CheckIfExistsTMFObjectSQL = `SELECT id, hash, updated FROM tmfobject WHERE id = :id AND version = :version;`
-
 // CheckIfExists reports if there is an object in the database with a given id and version.
 // It returns in addition its hash and freshness to enable comparisons with other objects.
 func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) (bool, []byte, int, error) {
@@ -58,7 +56,9 @@ func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) 
 		}
 		defer tmf.dbpool.Put(dbconn)
 	}
+
 	// Check if the row already exists, with the same version
+	const CheckIfExistsTMFObjectSQL = `SELECT id, hash, updated FROM tmfobject WHERE id = :id AND version = :version;`
 	selectStmt, err := dbconn.Prepare(CheckIfExistsTMFObjectSQL)
 	if err != nil {
 		return false, nil, 0, err
@@ -85,8 +85,6 @@ func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) 
 
 }
 
-const UpdateTMFObjectSQL = `UPDATE tmfobject SET organizationIdentifier = :organizationIdentifier, organization = :organization, type = :type, name = :name, description = :description, lifecycleStatus = :lifecycleStatus, lastUpdate = :lastUpdate, content = :content, hash = :hash, updated = :updated WHERE id = :id AND version = :version;`
-
 // UpdateInStorage updates an object in the db with the contents of the po.
 func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 
@@ -99,6 +97,7 @@ func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 		defer tmf.dbpool.Put(dbconn)
 	}
 
+	const UpdateTMFObjectSQL = `UPDATE tmfobject SET organizationIdentifier = :organizationIdentifier, organization = :organization, type = :type, name = :name, description = :description, lifecycleStatus = :lifecycleStatus, lastUpdate = :lastUpdate, content = :content, hash = :hash, updated = :updated WHERE id = :id AND version = :version;`
 	updateStmt, err := dbconn.Prepare(UpdateTMFObjectSQL)
 	if err != nil {
 		return err
@@ -131,8 +130,6 @@ func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 	return nil
 }
 
-const InsertTMFObjectSQL = `INSERT INTO tmfobject (id, organizationIdentifier, organization, type, name, description, lifecycleStatus, version, lastUpdate, content, hash, created, updated) VALUES (:id, :organizationIdentifier, :organization, :type, :name, :description, :lifecycleStatus, :version, :lastUpdate, :content, :hash, :created, :updated);`
-
 // InsertInStorage inserts po into the database.
 func (tmf *TMFdb) InsertInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 
@@ -145,6 +142,7 @@ func (tmf *TMFdb) InsertInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 		defer tmf.dbpool.Put(dbconn)
 	}
 
+	const InsertTMFObjectSQL = `INSERT INTO tmfobject (id, organizationIdentifier, organization, type, name, description, lifecycleStatus, version, lastUpdate, content, hash, created, updated) VALUES (:id, :organizationIdentifier, :organization, :type, :name, :description, :lifecycleStatus, :version, :lastUpdate, :content, :hash, :created, :updated);`
 	insertStmt, err := dbconn.Prepare(InsertTMFObjectSQL)
 	if err != nil {
 		return err
@@ -231,7 +229,9 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
 		if !fresh {
 			slog.Debug("Upsert: row updated (not fresh)", "id", po.ID)
 		} else {
-			slog.Debug("Upsert: row updated (hash different)", "id", po.ID, "old", hash, "new", newHash)
+			hashStr := fmt.Sprintf("%X", hash)
+			newHashStr := fmt.Sprintf("%X", newHash)
+			slog.Debug("Upsert: row updated (hash different)", "id", po.ID, "old", hashStr, "new", newHashStr)
 		}
 
 		return nil // Skip inserting if the row already exists
@@ -250,9 +250,6 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
 	return nil
 }
 
-const RetrieveTMFObjectSQL = `SELECT * FROM tmfobject WHERE id = :id AND version = :version;`
-const RetrieveTMFObjectNoVersionSQL = `SELECT * FROM tmfobject WHERE id = :id ORDER BY version DESC;`
-
 // RetrieveLocalTMFObject retrieves the object with the href (is the same as the id).
 // The version is optional. If it is not provided, the most recently version (by lexicographic order) is retrieved.
 func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, version string) (po *TMFObject, found bool, err error) {
@@ -265,14 +262,16 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 		defer tmf.dbpool.Put(dbconn)
 	}
 
-	// We use a different SELECT statement depending on if version is provided or not.
+	// We use a different SELECT statement depending on whether version is provided or not.
 	// Except for admin users, normal users are given the latest version of the object.
 	var stmt *sqlite.Stmt
 	if len(version) == 0 {
+		const RetrieveTMFObjectNoVersionSQL = `SELECT * FROM tmfobject WHERE id = :id ORDER BY version DESC;`
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectNoVersionSQL)
 		defer stmt.Reset()
 		stmt.SetText(":id", href)
 	} else {
+		const RetrieveTMFObjectSQL = `SELECT * FROM tmfobject WHERE id = :id AND version = :version;`
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectSQL)
 		defer stmt.Reset()
 		stmt.SetText(":id", href)
@@ -381,7 +380,7 @@ func (tmf *TMFdb) RetrieveLocalListTMFObject(dbconn *sqlite.Conn, tmfType string
 
 // buildSelectFromParms creates a SELECT statement based on the query values.
 // For objects with same id, selects the one with the latest version.
-func buildSelectFromParms(tmfType string, queryValues url.Values) (string, []interface{}) {
+func buildSelectFromParms(tmfType string, queryValues url.Values) (string, []any) {
 
 	// Default values if the user did not specify them. -1 is equivalent to no values provided.
 	var limit = -1
@@ -419,20 +418,26 @@ func buildSelectFromParms(tmfType string, queryValues url.Values) (string, []int
 			// Special processing because TMForum allows to specify multiple values
 			// in the form 'lifecycleStatus=Launched,Active'
 			var vals = []string{}
+			// Allow several instances of 'lifecycleStatus' parameter in the query string
 			for _, v := range values {
 				parts := strings.Split(v, ",")
+				// Allow for whitespace surrounding the elements
+				for i := range parts {
+					parts[i] = strings.TrimSpace(parts[i])
+				}
 				vals = append(vals, parts...)
 			}
 
+			// Use either an equality or an inclusion expression
 			if len(vals) == 1 {
 				whereClause.AddWhereExpr(
 					cond.Args,
-					cond.Equal(key, sqlb.List(vals)),
+					cond.Equal("lifecycleStatus", sqlb.List(vals)),
 				)
 			} else {
 				whereClause.AddWhereExpr(
 					cond.Args,
-					cond.In(key, sqlb.List(vals)),
+					cond.In("lifecycleStatus", sqlb.List(vals)),
 				)
 			}
 
@@ -444,6 +449,9 @@ func buildSelectFromParms(tmfType string, queryValues url.Values) (string, []int
 			)
 
 		default:
+
+			// The rest of parameters are not in the fields of the SQL database.
+			// We have to use SQLite JSON expressions to search.
 			if len(values) == 1 {
 				whereClause.AddWhereExpr(
 					cond.Args,
@@ -470,6 +478,9 @@ func buildSelectFromParms(tmfType string, queryValues url.Values) (string, []int
 	// Ordering by the hash of the content of the TMF object complies with the requirements, as it is consistent across paginations
 	// and nobody can predict the final ordering a-priory. For a stable catalog, the ordering is the same for all users and at any time.
 	// When a provider creates or modifies a product, it will be inserted at an unpredictable position in the catalog.
+	// TODO: we can consider a more advanced variation, where we add to the hash a random number which is
+	// generated each day or week, and keeps the same until a new one is generated.
+	// In this way, ordering is efficient, random, and changes every week (or whatever period is chosen)
 	bu.OrderBy("hash")
 
 	// Pagination support

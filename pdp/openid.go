@@ -138,15 +138,23 @@ func DOME_JWKS() (jose.JSONWebKeySet, error) {
 	return jwks, nil
 }
 
+const DOME_LCL_WellKnown = "https://verifier.dome-marketplace-lcl.org/.well-known/openid-configuration"
 const DOME_DEV2_WellKnown = "https://verifier.dome-marketplace-dev2.org/.well-known/openid-configuration"
-const DOME_PRO_WellKnown = "https://verifier.dome-marketplace-prd.org/.well-known/openid-configuration"
+const DOME_PRO_WellKnown = "https://verifier.dome-marketplace.eu/.well-known/openid-configuration"
 
 func NewOpenIDConfig(environment Environment) (*OpenIDConfig, error) {
 
-	verifierWellKnownURL := DOME_DEV2_WellKnown
+	var verifierWellKnownURL string
 
-	if environment == DOME_PRO {
+	switch environment {
+	case DOME_PRO:
 		verifierWellKnownURL = DOME_PRO_WellKnown
+	case DOME_DEV2:
+		verifierWellKnownURL = DOME_DEV2_WellKnown
+	case DOME_LCL:
+		verifierWellKnownURL = DOME_LCL_WellKnown
+	default:
+		return nil, fmt.Errorf("invalid environment: %v", environment)
 	}
 
 	res, err := http.Get(verifierWellKnownURL)

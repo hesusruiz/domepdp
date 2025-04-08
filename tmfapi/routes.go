@@ -12,10 +12,28 @@ import (
 
 	"github.com/goccy/go-json"
 
+	"slices"
+
 	"github.com/hesusruiz/domeproxy/pdp"
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )
+
+var RoutePrefixes = []string{
+	"/catalog/category",
+	"/catalog/catalog",
+	"/catalog/productOffering",
+	"/catalog/productSpecification",
+	"/catalog/productOfferingPrice",
+	"/service/serviceSpecification",
+	"/resource/resourceSpecification",
+	"/party/organization",
+	"/api/v1/entities",
+}
+
+func PrefixInRequest(uri string) bool {
+	return slices.Contains(RoutePrefixes, uri)
+}
 
 func addHttpRoutes(
 	environment pdp.Environment,
@@ -34,48 +52,58 @@ func addHttpRoutes(
 	)
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	ruleEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug, nil, nil)
+	rulesEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug, nil, nil)
 	if err != nil {
 		panic(err)
 	}
 
+	// ****************************************************
+	// Set the routes needed for acting as a PIP
+	//
 	// Many routes share the same handlers, thanks to the consistency of the TMF APIs and underlying data model.
 	// We have one for all LIST requests (get several objects), and another for GET requests (get one object).
 
 	// The LISTING handlers for Category, Catalog and ProductOffering
-	mux.HandleFunc("GET /catalog/category", handleGETlist("category", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/productOffering", handleGETlist("productOffering", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/catalog", handleGETlist("catalog", logger, tmf, ruleEngine))
+	mux.HandleFunc("GET /catalog/category", handleGETlist("category", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /catalog/productOffering", handleGETlist("productOffering", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /catalog/catalog", handleGETlist("catalog", logger, tmf, rulesEngine))
 
 	// The GET one object handlers for all objects of interest
-	mux.HandleFunc("GET /catalog/category/{id}", handleGET("category", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/productOffering/{id}", handleGET("productOffering", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/productSpecification/{id}", handleGET("productSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /catalog/productOfferingPrice/{id}", handleGET("productOfferingPrice", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /service/serviceSpecification/{id}", handleGET("serviceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /resource/resourceSpecification/{id}", handleGET("resourceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("GET /party/organization/{id}", handleGET("organization", logger, tmf, ruleEngine))
+	mux.HandleFunc("GET /catalog/category/{id}", handleGET("category", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /catalog/productOffering/{id}", handleGET("productOffering", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /catalog/productSpecification/{id}", handleGET("productSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /catalog/productOfferingPrice/{id}", handleGET("productOfferingPrice", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /service/serviceSpecification/{id}", handleGET("serviceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /resource/resourceSpecification/{id}", handleGET("resourceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("GET /party/organization/{id}", handleGET("organization", logger, tmf, rulesEngine))
 
 	// The POST handlers
-	mux.HandleFunc("POST /catalog/category", handlePOST("category", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /catalog/productOffering", handlePOST("productOffering", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /catalog/productSpecification", handlePOST("productSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /catalog/productOfferingPrice", handlePOST("productOfferingPrice", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /service/serviceSpecification", handlePOST("serviceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /resource/resourceSpecification", handlePOST("resourceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("POST /party/organization", handlePOST("organization", logger, tmf, ruleEngine))
+	mux.HandleFunc("POST /catalog/category", handlePOST("category", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /catalog/productOffering", handlePOST("productOffering", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /catalog/productSpecification", handlePOST("productSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /catalog/productOfferingPrice", handlePOST("productOfferingPrice", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /service/serviceSpecification", handlePOST("serviceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /resource/resourceSpecification", handlePOST("resourceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("POST /party/organization", handlePOST("organization", logger, tmf, rulesEngine))
 
 	// The PATCH handlers
-	mux.HandleFunc("PATCH /catalog/category/{id}", handlePATCH("category", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /catalog/productOffering/{id}", handlePATCH("productOffering", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /catalog/productSpecification/{id}", handlePATCH("productSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /catalog/productOfferingPrice/{id}", handlePATCH("productOfferingPrice", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /service/serviceSpecification/{id}", handlePATCH("serviceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /resource/resourceSpecification/{id}", handlePATCH("resourceSpecification", logger, tmf, ruleEngine))
-	mux.HandleFunc("PATCH /party/organization/{id}", handlePATCH("organization", logger, tmf, ruleEngine))
+	mux.HandleFunc("PATCH /catalog/category/{id}", handlePATCH("category", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /catalog/productOffering/{id}", handlePATCH("productOffering", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /catalog/productSpecification/{id}", handlePATCH("productSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /catalog/productOfferingPrice/{id}", handlePATCH("productOfferingPrice", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /service/serviceSpecification/{id}", handlePATCH("serviceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /resource/resourceSpecification/{id}", handlePATCH("resourceSpecification", logger, tmf, rulesEngine))
+	mux.HandleFunc("PATCH /party/organization/{id}", handlePATCH("organization", logger, tmf, rulesEngine))
 
-	// The AUTH handler for acting as a pure PDP
-	mux.HandleFunc("GET /authorize/v1/policies/authz", pdp.HandleGETAuthorization(logger, tmf, ruleEngine))
+	//
+	// End of the routes needed for acting as a PIP
+	// ****************************************************
+
+	// ****************************************************
+	// Set the route needed for acting as a pure PDP.
+	// In this mode, an external PIP will call us.
+	// This route can also be used by any application or service asking for authotization info
+	mux.HandleFunc("GET /authorize/v1/policies/authz", pdp.HandleGETAuthorization(logger, tmf, rulesEngine))
 
 }
 

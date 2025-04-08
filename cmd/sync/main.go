@@ -23,25 +23,37 @@ func main() {
 	var refreshTime = flag.Int("refresh", 3600, "refresh time in seconds, to update all objects older than this time")
 	var dump = flag.String("dump", "", "display an object by identifier")
 	var delete = flag.Bool("delete", false, "delete the database before performing a new synchronization")
-	var production = flag.Bool("production", false, "operate in PRODUCTION. Otherwise, use DEV2")
+	var envir = flag.String("env", "lcl", "environment, one of lcl, dev2 or pro.")
 
 	flag.Parse()
 
 	var server pdp.Environment
-	if *production {
+
+	switch *envir {
+	case "pro":
 		server = pdp.DOME_PRO
 		if *delete {
 			os.Remove(pdp.PRO_dbname)
 			os.Remove(pdp.PRO_dbname + "-shm")
 			os.Remove(pdp.PRO_dbname + "-wal")
 		}
-	} else {
+	case "dev2":
 		server = pdp.DOME_DEV2
 		if *delete {
 			os.Remove(pdp.DEV2_dbname)
 			os.Remove(pdp.DEV2_dbname + "-shm")
 			os.Remove(pdp.DEV2_dbname + "-wal")
 		}
+	case "lcl":
+		server = pdp.DOME_LCL
+		if *delete {
+			os.Remove(pdp.LCL_dbname)
+			os.Remove(pdp.LCL_dbname + "-shm")
+			os.Remove(pdp.LCL_dbname + "-wal")
+		}
+	default:
+		fmt.Printf("unknown environment: %v. Must be one of lcl, dev2 or pro\n", *envir)
+		os.Exit(1)
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -70,6 +82,8 @@ func main() {
 		fmt.Println(string(out))
 		return
 	}
+
+	fmt.Println("Cloning", *envir)
 
 	// Retrieve the product offerings
 	_, visitedObjects, err := tmf.CloneRemoteProductOfferings()
