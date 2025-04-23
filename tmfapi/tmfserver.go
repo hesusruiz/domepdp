@@ -26,9 +26,13 @@ import (
 //     evaluating the policies before the requests arrive to the actual implementation of the APIs.
 //  2. As a 'pure' PDP, acting as an authorization server for some upstream PIP like NGINX. In this
 //     mode, requests are intercepted by the PIP which asks the PDP for an authorization decision.
-func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool) (tmfConfig *pdp.Config, execute func() error, interrupt func(error), err error) {
+func TMFServerHandler(
+	environment pdp.Environment,
+	pdpAddress string,
+	debug bool,
+) (tmfConfig *pdp.Config, execute func() error, interrupt func(error), err error) {
 
-	// Set the defaul configuration, depending on the environment
+	// Set the defaul configuration, depending on the environment (production, development, ...)
 	tmfConfig = pdp.DefaultConfig(environment)
 	tmf, err := pdp.New(tmfConfig)
 	if err != nil {
@@ -59,18 +63,23 @@ func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool
 	startServer := func() error {
 
 		// Start a cloning process immediately
-		slog.Info("started cloning", "time", time.Now().String())
 		slog.Info("Starting PDP and TMForum API server", "addr", pdpAddress)
-		slog.Info("finished cloning", "time", time.Now().String())
 
 		// Start a backgroud process to clone the database every 10 minutes
 		go func() {
+
+			start := time.Now()
+			slog.Info("started cloning", "time", start.String())
 			tmf.CloneRemoteProductOfferings()
+			elapsed := time.Since(start)
+			slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
 			c := time.Tick(10 * time.Minute)
+
 			for next := range c {
 				slog.Info("started cloning", "time", next.String())
 				tmf.CloneRemoteProductOfferings()
-				slog.Info("finished cloning", "time", time.Now().String())
+				elapsed := time.Since(next)
+				slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
 			}
 		}()
 
@@ -85,6 +94,7 @@ func TMFServerHandler(environment pdp.Environment, pdpAddress string, debug bool
 	stopServer := func(error) {
 		tmf.Close()
 		slog.Info("Cancelling the HTTP server")
+		// Give 10 seconds to the server to clean up orderly
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.Shutdown(ctx)

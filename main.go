@@ -26,6 +26,8 @@ import (
 
 func main() {
 
+	enableMITM := flag.Bool("enablemitm", false, "enable the Man-In-The-Middle proxy server")
+
 	pdpAddress := flag.String("pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
 	mitmAddress := flag.String("mitm", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
 	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
@@ -97,20 +99,24 @@ func main() {
 	// Add to the monitoring group
 	gr.Add(execute, interrupt)
 
-	// Start a MITM server to intercept the requests to the TMF APIs
-	mitmConfig := &mitm.Config{
-		Listen:        *mitmAddress,
-		CaCertFile:    *caCertFile,
-		CaKeyFile:     *caKeyFile,
-		ProxyPassword: *proxyPassword,
-		HostTargets:   tmfConfig.HostTargets,
+	if *enableMITM {
+
+		// Start a MITM server to intercept the requests to the TMF APIs
+		mitmConfig := &mitm.Config{
+			Listen:        *mitmAddress,
+			CaCertFile:    *caCertFile,
+			CaKeyFile:     *caKeyFile,
+			ProxyPassword: *proxyPassword,
+			HostTargets:   tmfConfig.HostTargets,
+		}
+		pdpServer := "http://localhost" + *pdpAddress
+		execute, interrupt, err = mitm.MITMServerHandler(mitmConfig, pdpServer)
+		if err != nil {
+			panic(err)
+		}
+		gr.Add(execute, interrupt)
+
 	}
-	pdpServer := "http://localhost" + *pdpAddress
-	execute, interrupt, err = mitm.MITMServerHandler(mitmConfig, pdpServer)
-	if err != nil {
-		panic(err)
-	}
-	gr.Add(execute, interrupt)
 
 	// The management of the interrupt signal (ctrl-c)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

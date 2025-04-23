@@ -61,7 +61,7 @@ func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) 
 	const CheckIfExistsTMFObjectSQL = `SELECT id, hash, updated FROM tmfobject WHERE id = :id AND version = :version;`
 	selectStmt, err := dbconn.Prepare(CheckIfExistsTMFObjectSQL)
 	if err != nil {
-		return false, nil, 0, err
+		return false, nil, 0, fmt.Errorf("CheckIfExists: %w", err)
 	}
 	defer selectStmt.Reset()
 
@@ -70,7 +70,7 @@ func (tmf *TMFdb) CheckIfExists(dbconn *sqlite.Conn, id string, version string) 
 
 	hasRow, err := selectStmt.Step()
 	if err != nil {
-		return false, nil, 0, err
+		return false, nil, 0, fmt.Errorf("CheckIfExists: %w", err)
 	}
 
 	// Each object has a hash to make sure it is the same object, even if the version is the same
@@ -100,7 +100,7 @@ func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 	const UpdateTMFObjectSQL = `UPDATE tmfobject SET organizationIdentifier = :organizationIdentifier, organization = :organization, type = :type, name = :name, description = :description, lifecycleStatus = :lifecycleStatus, lastUpdate = :lastUpdate, content = :content, hash = :hash, updated = :updated WHERE id = :id AND version = :version;`
 	updateStmt, err := dbconn.Prepare(UpdateTMFObjectSQL)
 	if err != nil {
-		return err
+		return fmt.Errorf("UpdateInStorage: %w", err)
 	}
 	defer updateStmt.Reset()
 
@@ -124,7 +124,7 @@ func (tmf *TMFdb) UpdateInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 	_, err = updateStmt.Step()
 	if err != nil {
 		slog.Error("UpdateInStorage", "href", po.ID, "error", err)
-		return err
+		return fmt.Errorf("UpdateInStorage: %w", err)
 	}
 
 	return nil
@@ -173,7 +173,7 @@ func (tmf *TMFdb) InsertInStorage(dbconn *sqlite.Conn, po *TMFObject) error {
 	return nil
 }
 
-func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
+func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) (err error) {
 
 	if dbconn == nil {
 		var err error
@@ -181,11 +181,12 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
 		if err != nil {
 			return err
 		}
-		defer func() {
-			tmf.dbpool.Put(dbconn)
-
-		}()
+		defer tmf.dbpool.Put(dbconn)
 	}
+
+	// Start a SAVEPOINT and defer its Commit/Rollback
+	release := sqlitex.Save(dbconn)
+	defer release(&err)
 
 	// Get the type of object from the ID
 	objectType, err := TMFObjectIDtoType(po.ID)
@@ -199,6 +200,8 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) error {
 		po.OrganizationIdentifier = ""
 		po.Organization = ""
 	}
+
+	// TODO: use a SAVEPOINT to wrap the check and the update
 
 	// Check if the row already exists, with the same version
 	hasRow, hash, freshness, err := tmf.CheckIfExists(dbconn, po.ID, po.Version)
@@ -275,7 +278,7 @@ func (tmf *TMFdb) RetrieveLocalTMFObject(dbconn *sqlite.Conn, href string, versi
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectSQL)
 		defer stmt.Reset()
 		stmt.SetText(":id", href)
-		stmt.SetText(":version", href)
+		stmt.SetText(":version", version)
 	}
 
 	hasRow, err := stmt.Step()
@@ -359,10 +362,6 @@ func (tmf *TMFdb) RetrieveLocalListTMFObject(dbconn *sqlite.Conn, tmfType string
 				log.Println(err)
 				return err
 			}
-
-			// TODO: we need to apply here the access control policies, to skip those objects which do
-			// not comply with the policies for the current user.
-			// Alternatively, we can implement this at the higher layer, before returning to the user.
 
 			resultPOs = append(resultPOs, po)
 

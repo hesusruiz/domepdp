@@ -218,15 +218,11 @@ func (tmf *TMFdb) CloneOneProductOffering(oMap map[string]any, indent int, visit
 		if err != nil {
 			return nil, err
 		}
-		defer func() {
-			tmf.dbpool.Put(dbconn)
-		}()
+		defer tmf.dbpool.Put(dbconn)
 
-		// Start the Savepoint and defer its Commint/Rollback
+		// Start a SAVEPOINT and defer its Commit/Rollback
 		release := sqlitex.Save(dbconn)
-		defer func() {
-			release(&err)
-		}()
+		defer release(&err)
 
 		// Create the ProductOffering object with whatever info we have now. We will then retrieve the owner info,
 		// update it and save it in the local database.
@@ -450,16 +446,38 @@ func (tmf *TMFdb) GetProductOfferingOwner(dbconn *sqlite.Conn, productOfferingMa
 	// At this point we have to retrieve the owner information from the remote server
 
 	// Get the info to retrieve the productSpecification object from the server
-	psMap := productOfferingMap["productSpecification"].(map[string]any)
-	if psMap == nil {
-		slog.Info("productSpecification is nil")
-		return "", "", fmt.Errorf("productSpecification is nil")
+	psMap, ok := productOfferingMap["productSpecification"].(map[string]any)
+	if !ok {
+		slog.Warn("productSpecification is nil or not a map", "productOffering id", productOfferingMap["id"])
+		return "", "", fmt.Errorf("productSpecification is nil or not a map")
+	}
+
+	if len(psMap) == 0 {
+		slog.Info("productSpecification is empty")
+		return "", "", fmt.Errorf("productSpecification is empty")
+	}
+
+	// Get the href to retrieve the remote associated object
+	href, ok := psMap["href"].(string)
+	if !ok {
+		slog.Warn("productSpecification 'href' is nil or not a string", "productOffering id", productOfferingMap["id"])
+
+		// Try with the ID, as they are equal
+		href, ok = psMap["id"].(string)
+		if !ok {
+			slog.Warn("productSpecification 'id' is nil or not a string", "productOffering id", productOfferingMap["id"])
+			return "", "", fmt.Errorf("href is nil or not a string")
+		}
+	}
+
+	if href == "" {
+		return "", "", fmt.Errorf("href is nil or not a string")
 	}
 
 	// Use the 'href' field to retrieve the productSpecification object from the server
 	// After the call, the productSpecification object is already persisted locally with the owner information in the
 	// standard TMF format. We need to update the database in the format we need for efficient SQL queries.
-	productSpecification, _, err := tmf.RetrieveOrUpdateObject(dbconn, psMap["href"].(string), "", "", LocalOrRemote)
+	productSpecification, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, "", "", LocalOrRemote)
 	if err != nil {
 		slog.Error(err.Error())
 		return "", "", err
@@ -573,7 +591,13 @@ func (tmf *TMFdb) getRelatedPartyOwner(oMap map[string]any) (string, string, err
 
 // RetrieveOrUpdateObject retrieves an object from the local database or from the server if it is not in the local database.
 // The function returns the object and a boolean indicating if the object was retrieved from the local database.
-func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid string, organization string, location AccessType) (localpo *TMFObject, local bool, err error) {
+func (tmf *TMFdb) RetrieveOrUpdateObject(
+	dbconn *sqlite.Conn,
+	href string,
+	oid string,
+	organization string,
+	location AccessType,
+) (localpo *TMFObject, local bool, err error) {
 
 	if dbconn == nil {
 		var err error
@@ -581,33 +605,32 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 		if err != nil {
 			return nil, false, err
 		}
-		defer func() {
-			tmf.dbpool.Put(dbconn)
-		}()
+		defer tmf.dbpool.Put(dbconn)
 	}
 
 	// Check if the object is already in the local database
 	localpo, found, err := tmf.RetrieveLocalTMFObject(dbconn, href, "")
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("retrieving local object: %w", err)
 	}
 
-	// We can only search in the local database, and the object was not found
+	// Return with an error if the object was not found and caller specified 'local only search'
 	if !found && (location == OnlyLocal) {
 		return nil, false, fmt.Errorf("object not found in local database: %s", href)
 	}
 
+	// TODO: remove this, as it is used only for diagnostics
 	if found && localpo.Type == "productOfferingPrice" && localpo.OrganizationIdentifier == "" {
 		slog.Error("no OrganizationIdentifier in retrieved object", "location", location.String(), "incoming", oid, "id", href)
 	}
 
 	now := time.Now().Unix()
 
-	// The object was found in the local database and it is fresh enough, so we return it
+	// Return the local object if it was found and it is fresh enough
 	if found && (int(now-localpo.Updated) < tmf.Maxfreshness) {
-		// Special case: we found the object, it does not have the organizationIdentifier, but the call provides one.
-		// We just replace the object, setting the organizationIdentifier.
 		if localpo.OrganizationIdentifier == "" && oid != "" {
+			// Special case: we found the object, it does not have the organizationIdentifier, but the caller provides one.
+			// We just replace the object, setting the organizationIdentifier to what the caller specifies.
 
 			// Set the owner id
 			localpo, err = localpo.SetOwner(oid, organization)
@@ -615,7 +638,7 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 				return nil, false, err
 			}
 
-			// Insert the object in the local database
+			// Update the object in the local database
 			err = tmf.UpsertTMFObject(dbconn, localpo)
 			if err != nil {
 				return nil, false, err
@@ -641,19 +664,19 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 		oid = localpo.OrganizationIdentifier
 	}
 
-	// In any other case we have to retrieve the object from the server
+	// Get the object from the server
 	remotepo, err := tmf.RetrieveRemoteTMFObject(href)
 	if err != nil {
 		return nil, false, err
 	}
 
-	// Set the owner id, because remote objects do not have it
+	// Set the owner id, because remote objects may not have it
 	remotepo, err = remotepo.SetOwner(oid, organization)
 	if err != nil {
 		return nil, false, err
 	}
 
-	// Insert the object in the local database
+	// Update the object in the local database
 	err = tmf.UpsertTMFObject(dbconn, remotepo)
 	if err != nil {
 		return nil, false, err
@@ -662,11 +685,20 @@ func (tmf *TMFdb) RetrieveOrUpdateObject(dbconn *sqlite.Conn, href string, oid s
 	return remotepo, false, nil
 }
 
-func (tmf *TMFdb) visitMap(dbconn *sqlite.Conn, currentObject map[string]any, oid string, organization string, indent int, visitedObjects map[string]bool) {
+// visitMap visits recursively the descendants of an objec (representaed as a map).
+// It handles cicles to avoid infinite loops.
+func (tmf *TMFdb) visitMap(
+	dbconn *sqlite.Conn,
+	currentObject map[string]any,
+	oid string,
+	organization string,
+	indent int,
+	visitedObjects map[string]bool,
+) {
 
-	// A map object can contain a 'href' field that points to another object.
+	// A map object can contain an 'href' field that points to another object.
 	// In this case we retrieve and visit the object, if it was not retrieved before.
-	// For other map objects we print the relevant fields
+	// For other map objects we print the relevant fields if enabled by the tmf.Dump variable.
 	if currentObject["href"] != nil {
 		href := currentObject["href"].(string)
 		if tmf.Dump {
@@ -705,6 +737,7 @@ func (tmf *TMFdb) visitMap(dbconn *sqlite.Conn, currentObject map[string]any, oi
 	}
 }
 
+// visitArray is the complement to visitMap for recursive traversal of a TMForum object graph
 func (tmf *TMFdb) visitArray(dbconn *sqlite.Conn, arr []any, oid string, organization string, indent int, visitedObjects map[string]bool) {
 	for i, v := range arr {
 		switch v := v.(type) {
@@ -721,124 +754,6 @@ func (tmf *TMFdb) visitArray(dbconn *sqlite.Conn, arr []any, oid string, organiz
 		}
 	}
 }
-
-// func (tmf *TMFdb) visitObjectMapTrace(dbconn *sqlite.Conn, currentObject map[string]any, oid string, organization string, indent int) {
-
-// 	// A map object can contain a 'href' field that points to another object.
-// 	// In this case we retrieve and visit the object, if it was not retrieved before.
-// 	// For other map objects we print the relevant fields
-// 	if currentObject["href"] != nil {
-// 		href := currentObject["href"].(string)
-// 		if tmf.Dump {
-// 			fmt.Printf("%shref: %v\n", indentStr(indent), href)
-// 		}
-// 		if !visitedObjects[href] {
-// 			visitedObjects[href] = true
-// 			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, oid, organization, LocalOrRemote)
-// 			if err != nil {
-// 				slog.Error(err.Error())
-// 			} else {
-// 				tmf.visitMap(dbconn, remoteObj.ContentMap, oid, organization, indent+3)
-// 			}
-// 		}
-// 	}
-
-// 	for k, v := range currentObject {
-// 		switch v := v.(type) {
-// 		case string:
-// 			switch k {
-// 			case "href":
-// 				// Skip the href field, as we have processed it before
-// 				continue
-
-// 			case "startDateTime", "lifecycleStatus", "version", "lastUpdate", "created", "updated", "id", "externalReference":
-// 				if tmf.Dump {
-// 					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-// 				}
-
-// 			case "role":
-// 				if tmf.Dump {
-// 					fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-// 				}
-
-// 			default:
-// 				if tmf.Dump {
-// 					fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
-// 				}
-// 			}
-
-// 		case float64:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-// 			}
-
-// 		case bool:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%s: %v\n", indentStr(indent), k, v)
-// 			}
-
-// 		case map[string]any:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%s:\n", indentStr(indent), k)
-// 			}
-// 			tmf.visitMap(dbconn, v, oid, organization, indent+3)
-
-// 		case []any:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%s: [\n", indentStr(indent), k)
-// 			}
-// 			tmf.visitArray(dbconn, v, oid, organization, indent+3)
-// 			if tmf.Dump {
-// 				fmt.Printf("%s]\n", indentStr(indent))
-// 			}
-
-// 		default:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%s: %T\n", indentStr(indent), k, v)
-// 			}
-// 		}
-// 	}
-// }
-
-// func (tmf *TMFdb) visitArrayTrace(dbconn *sqlite.Conn, arr []any, oid string, organization string, indent int) {
-// 	for i, v := range arr {
-// 		switch v := v.(type) {
-// 		case string:
-// 			if v == "role" {
-// 				if tmf.Dump {
-// 					fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-// 				}
-// 			} else {
-// 				if tmf.Dump {
-// 					fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
-// 				}
-// 			}
-
-// 		case float64:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-// 			}
-// 		case bool:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%d: %v\n", indentStr(indent), i, v)
-// 			}
-// 		case map[string]any:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%d:\n", indentStr(indent), i)
-// 			}
-// 			tmf.visitMap(dbconn, v, oid, organization, indent+3)
-// 		case []any:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%d:\n", indentStr(indent), i)
-// 			}
-// 			tmf.visitArray(dbconn, v, oid, organization, indent+3)
-// 		default:
-// 			if tmf.Dump {
-// 				fmt.Printf("%s%d: %T\n", indentStr(indent), i, v)
-// 			}
-// 		}
-// 	}
-// }
 
 // RetrieveRemoteTMFObject retrieves a TMF object from the DOME server.
 //
