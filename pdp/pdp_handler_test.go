@@ -59,7 +59,7 @@ func TestPDP_Handler(t *testing.T) {
 		DOME_PRO,
 	)
 
-	tmf, err := New(tmfConfig)
+	tmf, err := NewTMFdb(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -177,7 +177,7 @@ func BenchmarkPDPhandler(b *testing.B) {
 		DOME_PRO,
 	)
 
-	tmf, err := New(tmfConfig)
+	tmf, err := NewTMFdb(tmfConfig)
 	if err != nil {
 		panic(err)
 	}

@@ -60,7 +60,7 @@ func main() {
 
 	tmfConfig := pdp.DefaultConfig(server)
 
-	tmf, err := pdp.New(tmfConfig)
+	tmf, err := pdp.NewTMFdb(tmfConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

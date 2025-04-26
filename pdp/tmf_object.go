@@ -93,3 +93,8 @@ func (po *TMFObject) Hash() []byte {
 	hasher.Write(po.Content)
 	return hasher.Sum(nil)
 }
+
+func (po *TMFObject) ETag() string {
+	etag := fmt.Sprintf(`"%x"`, po.Hash())
+	return etag
+}

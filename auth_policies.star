@@ -10,18 +10,17 @@ four objects that can be used to implement the authorization policies: 'request'
 
 "request" is an object with the following fields representing the HTTP request received:
 
-    "action": one of 'CREATE', 'READ', 'UPDATE' or 'DELETE', an alias of the HTTP method of the request.
-    "tmf_entity": the TMForum entity being accessed (eg., productOffering, catalog, etc.).
-    "tmf_id": the identifier of the TMForum object being accessed.
-    "remote_addr": the IP address of the remote machine acessing the object.
+    "action": one of 'LIST', 'READ', 'CREATE', 'UPDATE' or 'DELETE', an alias of the HTTP method of the request.
     "method": the HTTP method that was used in the request ('GET', 'POST', 'PUT', 'PATCH' or 'DELETE').
     "host": the host header in the request.
-    "remoteip": the IP of the remote host sending the request.
-    "url": the complete url of the request.
+    "remote_addr": the IP address of the remote machine acessing the object.
     "path": the url path (does not include the the query parameters).
-    "protocol": the 'http' or 'https' protocol.
-    "headers": a dictionary with the headers in the HTTP request.
     "query": a dictionary with all the query parameters in the url.
+
+    "tmf_entity": the TMForum entity being accessed (eg., productOffering, catalog, etc.).
+    "tmf_id": the identifier of the TMForum object being accessed.
+
+    "headers": a dictionary with the headers in the HTTP request.
 
 "token" is an object with the contents of the Access Token received with
     the request. The most important object inside the 'token' object is

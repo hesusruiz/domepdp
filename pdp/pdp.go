@@ -99,9 +99,23 @@ type PDP struct {
 
 	// The pool of instances of the policy execution engines, to minimize startup
 	// and teardown overheads.
+	// Every goroutine uses its own instance from the pool, so they are goroutine safe.
+	// If the file with the policies change, the associated Starlark thread is updated,
+	// Goroutines using old versions will run until completion, and new ones will pick
+	// the new version of the policies
 	threadPool sync.Pool
 }
 
+// NewPDP creates a new PDP instance.
+//   - environment is the run-time environment (development or production)
+//   - fileName specifies the file with the policies
+//     debug enables more logging information
+//   - readFileFun is a user-provided function to read the file from where it is stored. If not
+//     provided, the default function is used, which reads from the disk and using a cache
+//     to improve performance.
+//   - verificationKeyFunc is a user-provided function to supply the verification key for
+//     access tokens. If not provided, the default function is used which queries the Verifier
+//   - JWKS endpoint for the public key of the Verifier.
 func NewPDP(environment Environment,
 	fileName string,
 	debug bool,
@@ -115,7 +129,7 @@ func NewPDP(environment Environment,
 	m.fileCache = sync.Map{}
 
 	if readFileFun == nil {
-		m.readFileFun = m.readFileIfNew
+		m.readFileFun = m.defaultReadFileFun
 	} else {
 		m.readFileFun = readFileFun
 	}
@@ -128,6 +142,7 @@ func NewPDP(environment Environment,
 
 	// Retrieve the key at initialization time, to discover any possible
 	// error in environment configuration as early as possible (eg, the Verifier is not running).
+	// TODO: provide for refresh of the key without restarting the PDP
 	var err error
 	m.verifierJWK, err = m.verificationKeyFun(environment)
 	if err != nil {
@@ -182,7 +197,7 @@ func (m *PDP) VerificationJWK() (key *jose.JSONWebKey, err error) {
 // threadEntry represents the pool of Starlark threads for policy rules execution.
 // All instances are normally the same, using the same compiled version of the same file.
 // The pool increases concurrency because a given Starlark thread can be reused
-// among goroutines, but not used concurrently.
+// among goroutines, but not used concurrently by the same goroutine.
 // Another benefit is that it facilitates the dynamic update of policy files without
 // affecting concurrency.
 type threadEntry struct {
@@ -196,8 +211,8 @@ type threadEntry struct {
 
 // BufferedParseAndCompileFile reads a file with Starlark code and compiles it, storing the resulting global
 // dictionary for later usage. In particular, the compiled module should define two functions,
-// one for athentication and the second for athorisation.
-// ParseAndCompileFile can be called several times and will perform a new compilation every time,
+// one for athentication and the second for authorisation.
+// BufferedParseAndCompileFile can be called several times and will perform a new compilation every time,
 // creating a new Thread and so the old ones will never be called again and eventually will be disposed.
 func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 	slog.Debug("===> BufferedParseAndCompileFile")
@@ -229,6 +244,7 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 	}
 
 	// Parse and execute the top-level commands in the script file
+	// The globals are thread-local and not process-global
 	te.globals, err = st.ExecFileOptions(&syntax.FileOptions{}, te.thread, scriptname, src, te.predeclared)
 	if err != nil {
 		slog.Error("error compiling Starlark program", slogor.Err(err))
@@ -250,7 +266,7 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 
 }
 
-// getGlobalFunction retrieves a Callable from the globals dictionary.
+// getGlobalFunction retrieves a Callable from the supplied globals dictionary.
 func getGlobalFunction(globals st.StringDict, funcName string) (*st.Function, error) {
 
 	// Check that we have the function
@@ -284,7 +300,9 @@ type fileEntry struct {
 const maxFileSize = 1024 * 1024
 const freshness = 20 * time.Second
 
-func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
+// defaultReadFileFun reads the given file from disk, using a sync.Map to store it
+// It is safe for concurrent use.
+func (m *PDP) defaultReadFileFun(fileName string) ([]byte, bool, error) {
 
 	now := time.Now()
 
@@ -295,10 +313,10 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 
 		// Return the entry if it is fresh enough.
 		if now.Sub(entry.entryUpdated) < freshness {
-			slog.Debug("found and cache entry is fresh")
+			slog.Debug("readFileIfNew", "file", fileName, "msg", "found and cache entry is fresh")
 			return entry.content, true, nil
 		}
-		slog.Debug("found but entry is NOT fresh")
+		slog.Debug("readFileIfNew", "file", fileName, "msg", "found but entry is NOT fresh")
 	}
 
 	// We are here because either the entry was not found or is not fresh.
@@ -306,27 +324,27 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 	// We discard directories.
 	fileInfo, err := os.Stat(fileName)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("readFileIfNew: error checking file %s: %w", fileName, err)
 	} else if fileInfo.Mode().IsDir() {
-		return nil, false, fmt.Errorf("is a directory, not a file")
+		return nil, false, fmt.Errorf("readFileIfNew: file %s is a directory, not a file", fileName)
 	}
 
 	// Check if the size is "reasonable" to be loaded in the cache
 	if fileInfo.Size() > maxFileSize {
-		return nil, false, fmt.Errorf("file too big")
+		return nil, false, fmt.Errorf("readFileIfNew: file %s is too big", fileName)
 	}
 
 	modifiedAt := fileInfo.ModTime()
 
 	// If not found, read the file, set in the cache and return the file.
 	if !found {
-		slog.Debug("entry not found in cache")
+		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry not found in cache")
 		content, err := os.ReadFile(fileName)
 		if err != nil {
 			return nil, false, err
 		}
 
-		// Add to the cache
+		// Add or replace the content of the file cache
 		entry := &fileEntry{
 			name:         fileName,
 			entryUpdated: now,
@@ -348,7 +366,7 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 		// Read the file
 		content, err := os.ReadFile(fileName)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("readFileIfNew: error reading file %s: %w", fileName, err)
 		}
 
 		// Add to the cache
@@ -359,14 +377,14 @@ func (m *PDP) readFileIfNew(fileName string) ([]byte, bool, error) {
 			content:      content,
 		}
 
-		slog.Debug("file modification is later than in entry")
+		slog.Debug("readFileIfNew", "file", fileName, "msg", "file modification is later than in entry")
 		m.fileCache.Store(fileName, entry)
 		return content, false, nil
 
 	} else {
 
 		// The entry in the cache is still valid, update the timestamp and return the file.
-		slog.Debug("entry was not fresh but still valid")
+		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry was not fresh but still valid")
 		entry.entryUpdated = now
 
 		// And return contents

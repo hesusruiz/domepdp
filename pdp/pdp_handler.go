@@ -67,8 +67,10 @@ func HandleLISTAuth(
 	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
+	// LIST requests can be unauthenticated, but individual returned objects are
+	// subject to visibility policies
 	// tokstring will be the empty string if no access token is found
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
+	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, false)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err))
 		return nil, fmt.Errorf("processing the access token: %w", err)
@@ -192,15 +194,17 @@ func HandleREADAuth(
 	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
+	// READ requests can be unauthenticated
 	// tokstring will be the empty string if no access token is found
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
+	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, false)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err), "id", id)
 		return nil, fmt.Errorf("processing the access token: %w", err)
 	}
 
 	// ***************************************************************************************
-	// 3. Retrieve the current object, either from the cache or remotely.
+	// 3. Retrieve the existing object from storage, either from the cache or remotely.
+	//    This allows to apply the policies.
 	// ***************************************************************************************
 
 	var tmfObject *TMFObject
@@ -226,18 +230,18 @@ func HandleREADAuth(
 
 	tmfObjectArgument := StarTMFMap(oMap)
 
-	// ****************************************************************************
+	// ****************************************************************************************
 	// 4. Build the user object, combining info from the Access Token and the retrieved object.
-	// ****************************************************************************
+	// ****************************************************************************************
 
-	// The returned user object always exists.
+	// The returned user object always exists, even if empty.
 	// If the token was not provided or the user info does not exist, we get a default user object
 	// probably only useful for reading public information.
 	userArgument := parseUserInfo(tokString, tokenArgument)
 
-	// *********************************************************************************
+	// *************************************************************************************
 	// 5. Build the convenience data object from the usage terms embedded in the TMF object.
-	// *********************************************************************************
+	// *************************************************************************************
 
 	// We convert the complex structure into simple lists of countries and operator identifiers
 	permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
@@ -252,15 +256,15 @@ func HandleREADAuth(
 	prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
 	tmfObjectArgument["permittedCountries"] = prohibitedOperators
 
-	// *********************************************************************************
+	// ********************************************************************************
 	// 6. Pass the request, the object and the user to the rules engine for a decision.
-	// *********************************************************************************
+	// ********************************************************************************
 
 	userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, tmfObjectArgument, userArgument)
 
-	// *********************************************************************************
+	// ***************************************************************************************
 	// 7. Reply to the caller with the object, if the rules engine did not deny the operation.
-	// *********************************************************************************
+	// ***************************************************************************************
 
 	if userCanAccessObject {
 		return tmfObject, nil
@@ -321,10 +325,11 @@ func HandleUPDATEAuth(
 	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
+	// UPDATE requests must be authenticated
 	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
-		slog.Error("HandleUPDATEAuth", slogor.Err(err))
-		return nil, fmt.Errorf("access token missing or not valid")
+		logger.Error("HandleUPDATEAuth: processing access token", slogor.Err(err))
+		return nil, fmt.Errorf("UPDATE: processing access token: %w", err)
 	}
 
 	// ***************************************************************************************
@@ -333,7 +338,7 @@ func HandleUPDATEAuth(
 
 	var existingTmfObject *TMFObject
 
-	slog.Debug("retrieving", "type", tmfType, "id", id)
+	logger.Debug("retrieving", "type", tmfType, "id", id)
 
 	// Check if the object is already in the local database
 	existingTmfObject, found, err := tmf.RetrieveLocalTMFObject(nil, id, "")
@@ -344,7 +349,7 @@ func HandleUPDATEAuth(
 		return nil, fmt.Errorf("pdp: object not found in local database: %s", id)
 	}
 
-	slog.Debug("object retrieved locally")
+	logger.Debug("object retrieved locally")
 
 	// ****************************************************************************
 	// 4. Check that the user is the owner of the object, using the organizationIdentifier in it.
@@ -381,7 +386,7 @@ func HandleUPDATEAuth(
 	// Set the user as the owner in the object being written
 	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
-	slog.Debug("updating", "type", tmfType)
+	logger.Debug("updating", "type", tmfType)
 
 	// *********************************************************************************
 	// 6. Check if the user can perform the operation on the object.
@@ -397,16 +402,16 @@ func HandleUPDATEAuth(
 	// **********************************************************************************
 
 	// We pass the same authorization token as the one we received from the caller
-	remotepo, err := doPATCH(tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, requestBody)
+	remotepo, err := doPATCH(logger, tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, requestBody)
 	if err != nil {
-		slog.Error("pdp: performing PATCH", slogor.Err(err))
+		logger.Error("pdp: performing PATCH", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
 	// Set the owner id, because remote objects do not have it
 	remotepo, err = remotepo.SetOwner(userOrganizationIdentifier, existingTmfObject.Organization)
 	if err != nil {
-		slog.Error("pdp: update object with oid", slogor.Err(err))
+		logger.Error("pdp: update object with oid", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
@@ -417,7 +422,7 @@ func HandleUPDATEAuth(
 	// Update the object in the local database
 	err = tmf.UpsertTMFObject(nil, remotepo)
 	if err != nil {
-		slog.Error("pdp: update local cache", slogor.Err(err))
+		logger.Error("pdp: update local cache", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
@@ -444,7 +449,7 @@ func HandleCREATEAuth(
 
 	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
-		slog.Error("HandleUPDATEAuth", slogor.Err(err))
+		logger.Error("HandleUPDATEAuth", slogor.Err(err))
 		return nil, fmt.Errorf("access token missing or not valid")
 	}
 
@@ -465,7 +470,7 @@ func HandleCREATEAuth(
 	// For a CREATE request, the user requires an organizationIdentifier
 	userOrganizationIdentifier := userArgument["organizationIdentifier"].(string)
 	if len(userOrganizationIdentifier) == 0 {
-		slog.Error("REJECTED: no user organization identifier", "user", userArgument)
+		logger.Error("REJECTED: no user organization identifier", "user", userArgument)
 		return nil, fmt.Errorf("not authorized")
 	}
 
@@ -490,14 +495,14 @@ func HandleCREATEAuth(
 		len(incomingObjectArgument["version"].(string)) == 0 ||
 		len(incomingObjectArgument["lifecycleStatus"].(string)) == 0 {
 
-		slog.Error("either name, version or lifecycleStatus is missing in the request body")
+		logger.Error("either name, version or lifecycleStatus is missing in the request body")
 		return nil, fmt.Errorf("invalid TMF object")
 	}
 
 	// Set the user as the owner in the object being written
 	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
-	slog.Debug("creating", "type", tmfType)
+	logger.Debug("creating", "type", tmfType)
 
 	// *********************************************************************************
 	// 6. Check if the user can perform the operation on the object.
@@ -520,9 +525,9 @@ func HandleCREATEAuth(
 
 	// Send the POST to the central server.
 	// A POST in TMForum does not reply with any data.
-	_, err = doPOST(tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, outgoingRequestBody)
+	_, err = doTMFPOST(logger, tmf.httpClient, tmf.Server()+r.URL.Path, tokString, userOrganizationIdentifier, outgoingRequestBody)
 	if err != nil {
-		slog.Error("pdp: performing POST", slogor.Err(err))
+		logger.Error("pdp: performing POST", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
@@ -532,28 +537,72 @@ func HandleCREATEAuth(
 
 	tmfObject, err := NewTMFObject(incomingObjectArgument, nil)
 	if err != nil {
-		slog.Error(err.Error())
+		logger.Error(err.Error())
 		return nil, err
 	}
 
 	// Insert the object in the local database
 	err = tmf.UpsertTMFObject(nil, tmfObject)
 	if err != nil {
-		slog.Error("pdp: update local cache", slogor.Err(err))
+		logger.Error("pdp: update local cache", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
 	}
 
 	return tmfObject, nil
 }
 
-func doPOST(url string, auth_token string, organizationIdentifier string, requestBody []byte) (*TMFObject, error) {
+// func doFastPOST(
+// 	logger *slog.Logger,
+// 	url string,
+// 	auth_token string,
+// 	organizationIdentifier string,
+// 	requestBody []byte,
+// ) (*TMFObject, error) {
+// 	const timeout = 10 * time.Second
+
+// 	// Get the request and response objects
+// 	req := fasthttp.AcquireRequest()
+// 	defer fasthttp.ReleaseRequest(req)
+// 	resp := fasthttp.AcquireResponse()
+// 	defer fasthttp.ReleaseResponse(resp)
+
+// 	req.SetBody(requestBody)
+
+// 	// This is a POST
+// 	req.Header.SetMethod("POST")
+
+// 	req.SetRequestURI(url)
+
+// 	// Set the headers for the outgoing request, including the authorization token
+// 	req.Header.Set("X-Organization", organizationIdentifier)
+// 	req.Header.Set("Authorization", "Bearer "+auth_token)
+// 	req.Header.Set("Accept", "application/json, text/plain, */*")
+// 	req.Header.SetContentType("application/json")
+
+// 	err := fasthttp.DoTimeout(req, resp, timeout)
+// 	if err != nil {
+// 		logger.Error("sending request", "object", url, slogor.Err(err))
+// 		return nil, fmt.Errorf("calling server: %w", err)
+// 	}
+
+// }
+
+func doTMFPOST(
+	logger *slog.Logger,
+	httpClient *http.Client,
+	url string,
+	auth_token string,
+	organizationIdentifier string,
+	requestBody []byte,
+) (*TMFObject, error) {
 
 	buf := bytes.NewReader(requestBody)
 
 	// This is a POST
 	req, err := http.NewRequest("POST", url, buf)
 	if err != nil {
-		return nil, err
+		logger.Error("doTMFPOST: creating request", "url", url, slogor.Err(err))
+		return nil, fmt.Errorf("doTMFPOST: creating request: %w", err)
 	}
 
 	// Set the headers for the outgoing request, including the authorization token
@@ -562,10 +611,10 @@ func doPOST(url string, auth_token string, organizationIdentifier string, reques
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("content-type", "application/json")
 
-	// Send the request
-	res, err := http.DefaultClient.Do(req)
+	// Send the request using the provided http client
+	res, err := httpClient.Do(req)
 	if err != nil {
-		slog.Error("sending request", "object", url, slogor.Err(err))
+		logger.Error("doTMFPOST: sending request", "url", url, slogor.Err(err))
 		return nil, err
 	}
 
@@ -573,13 +622,17 @@ func doPOST(url string, auth_token string, organizationIdentifier string, reques
 	replyBody, err := io.ReadAll(res.Body)
 	res.Body.Close()
 	if err != nil {
-		slog.Error(err.Error())
+		logger.Error("doTMFPOST: sending request", "url", url, slogor.Err(err))
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
-	if res.StatusCode > 299 {
-		slog.Error("retrieving object", "status code", res.StatusCode)
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		logger.Error("doTMFPOST: sending request", "url", url, "status code", res.StatusCode)
 		return nil, fmt.Errorf("retrieving object, status: %d", res.StatusCode)
+	}
+
+	if res.StatusCode != 201 {
+		logger.Warn("doTMFPOST: sending request", "url", url, "status code", res.StatusCode)
 	}
 
 	// Create a TMFObject struct from the body
@@ -594,7 +647,7 @@ func doPOST(url string, auth_token string, organizationIdentifier string, reques
 
 	tmfObject, err := NewTMFObject(oMap, nil)
 	if err != nil {
-		slog.Error(err.Error())
+		logger.Error("doTMFPOST: creating TMF object", "url", url, slogor.Err(err))
 		return nil, err
 	}
 
@@ -668,7 +721,8 @@ func marshallQuery(qmap StarTMFMap) string {
 	return b.String()
 }
 
-// tokenFromHeader retrieves the token string in the authorization header of an HTTP request
+// tokenFromHeader retrieves the token string in the Authorization header of an HTTP request.
+// Returns the empty string if the Authorization header does not exist or has an invalid value.
 func tokenFromHeader(r *http.Request) string {
 	// Get token from authorization header.
 	bearer := r.Header.Get("Authorization")
@@ -678,7 +732,7 @@ func tokenFromHeader(r *http.Request) string {
 	return ""
 }
 
-func doPATCH(url string, auth_token string, organizationIdentifier string, request_body []byte) (*TMFObject, error) {
+func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIdentifier string, request_body []byte) (*TMFObject, error) {
 
 	buf := bytes.NewReader(request_body)
 
@@ -695,17 +749,17 @@ func doPATCH(url string, auth_token string, organizationIdentifier string, reque
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Error("sending request", "object", url, slogor.Err(err))
+		logger.Error("sending request", "object", url, slogor.Err(err))
 		return nil, err
 	}
 	reply_body, err := io.ReadAll(res.Body)
 	res.Body.Close()
 	if res.StatusCode > 299 {
-		slog.Error("retrieving object", "status code", res.StatusCode)
+		logger.Error("retrieving object", "status code", res.StatusCode)
 		return nil, fmt.Errorf("retrieving object, status: %d", res.StatusCode)
 	}
 	if err != nil {
-		slog.Error(err.Error())
+		logger.Error(err.Error())
 		return nil, err
 	}
 
@@ -718,7 +772,7 @@ func doPATCH(url string, auth_token string, organizationIdentifier string, reque
 	// Create a TMFObject struct from the map
 	po, err := NewTMFObject(oMap, nil)
 	if err != nil {
-		slog.Error(err.Error())
+		logger.Error(err.Error())
 		return nil, err
 	}
 
@@ -742,6 +796,7 @@ var httpMethodAliases = map[string]string{
 // These are the ones we use, with notation from NGINX:
 // - X-Original-URI $request_uri;
 // - X-Original-Method $request_method
+// - X-Original-Operation this an alias for the operatio being requested
 // - X-Original-Remote-Addr $remote_addr;
 // - X-Original-Host $host;
 func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) {
@@ -756,16 +811,16 @@ func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error)
 	reqURL, err := url.ParseRequestURI(request_uri)
 	if err != nil {
 		logger.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
-		return nil, fmt.Errorf("X-Original-URI invalid: %W", err)
+		return nil, fmt.Errorf("X-Original-URI invalid: %w", err)
 	}
 
 	// X-Original-Method is compulsory
 	original_method := r.Header.Get("X-Original-Method")
-	methodAlias, found := httpMethodAliases[original_method]
-	if !found {
-		logger.Error("X-Original-Method missing or invalid", "method", original_method)
-		return nil, fmt.Errorf("X-Original-Method missing or invalid: %v", original_method)
+	if len(original_method) == 0 {
+		logger.Error("X-Original-Method missing")
+		return nil, fmt.Errorf("X-Original-Method missing")
 	}
+	original_operation := r.Header.Get("X-Original-Operation")
 
 	logger.Info("Request authorization", "URI", request_uri)
 
@@ -773,7 +828,7 @@ func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error)
 
 	// Enrich the request object: "action" is a synonym for the http method received
 	requestArgument := StarTMFMap{
-		"action":      methodAlias,
+		"action":      original_operation,
 		"host":        r.Header.Get("X-Original-Host"),
 		"method":      r.Header.Get("X-Original-Method"),
 		"remote_addr": r.Header.Get("X-Original-Remote-Addr"),
@@ -797,13 +852,6 @@ func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error)
 		logger.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
 		return nil, fmt.Errorf("X-Original-URI invalid")
 	}
-
-	// To simplify processing by rules, the path is converted to a list of path segments
-	// var elems []st.Value
-	// for _, v := range request_uri_parts {
-	// 	elems = append(elems, st.String(v))
-	// }
-	// requestArgument["path"] = StarTMFList(elems)
 
 	requestArgument["path"] = request_uri_parts
 
@@ -845,7 +893,14 @@ func processAccessToken(
 
 	tokString = tokenFromHeader(r)
 
-	if !verify || tokString == "" {
+	if len(tokString) == 0 {
+		// An empty token is an error if we have been requested to verify it
+		if verify {
+			logger.Error("access token missing")
+			return "", nil, fmt.Errorf("access token missing")
+		}
+	} else {
+		// If we do not have to verify, an empty token is not considered an error
 		return tokString, StarTMFMap{}, nil
 	}
 

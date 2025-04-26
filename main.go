@@ -14,14 +14,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"time"
 
 	"github.com/hesusruiz/domeproxy/internal/run"
+	"github.com/hesusruiz/domeproxy/internal/sqlogger"
 	"github.com/hesusruiz/domeproxy/mitm"
 	"github.com/hesusruiz/domeproxy/pdp"
 
 	"github.com/hesusruiz/domeproxy/tmfapi"
-	"gitlab.com/greyxor/slogor"
 )
 
 func main() {
@@ -34,19 +33,25 @@ func main() {
 	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
 	proxyPassword := flag.String("password", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
 	debug := flag.Bool("debug", false, "run in debug mode with more logs enabled")
-	var envir = flag.String("env", "lcl", "environment, one of lcl, dev2 or pro.")
+	nocolor := flag.Bool("nocolor", false, "disable color output for the logs to stdout")
+	envir := flag.String("env", "lcl", "environment, one of lcl, dev2 or pro.")
 
 	flag.Parse()
 
 	logLevel := new(slog.LevelVar)
-
-	slogor.SetLevel(logLevel)
-
 	if *debug {
 		logLevel.Set(slog.LevelDebug)
 	}
 
-	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(logLevel), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
+	mylogger, err := sqlogger.NewSQLogger(&sqlogger.Options{Level: logLevel, NoColor: *nocolor})
+	if err != nil {
+		panic(err)
+	}
+
+	logger := slog.New(
+		mylogger,
+	)
+	slog.SetDefault(logger)
 
 	// Start a debug server on a random port, enabling control of log level.
 	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +127,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	gr.Add(func() error {
 		<-ctx.Done()
+		fmt.Println("Hola esto se esta acabando")
+		mylogger.Close()
 		return fmt.Errorf("interrupt signal has been received")
 	}, func(error) {
 		stop()

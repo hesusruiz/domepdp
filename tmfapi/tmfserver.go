@@ -34,7 +34,7 @@ func TMFServerHandler(
 
 	// Set the defaul configuration, depending on the environment (production, development, ...)
 	tmfConfig = pdp.DefaultConfig(environment)
-	tmf, err := pdp.New(tmfConfig)
+	tmf, err := pdp.NewTMFdb(tmfConfig)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -151,7 +151,7 @@ func errorTMF(w http.ResponseWriter, statusCode int, code string, reason string)
 }
 
 // replyTMF sends an HTTP response in the TMForum format
-func replyTMF(w http.ResponseWriter, data []byte) {
+func replyTMF(w http.ResponseWriter, data []byte, additionalHeaders map[string]string) {
 
 	h := w.Header()
 
@@ -161,6 +161,12 @@ func replyTMF(w http.ResponseWriter, data []byte) {
 	// There might be content type already set, but we reset it to
 	h.Set("Content-Type", "application/json; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
+
+	// TODO: set Last-Modified
+	for k, v := range additionalHeaders {
+		h.Set(k, v)
+	}
+
 	w.Write(data)
 
 }

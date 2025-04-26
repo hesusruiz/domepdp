@@ -35,7 +35,7 @@ func TestPDP_TakeAuthnDecision(t *testing.T) {
 		DOME_PRO,
 	)
 
-	tmf, err := New(tmfConfig)
+	tmf, err := NewTMFdb(tmfConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -134,7 +134,7 @@ func BenchmarkAuthDecision(b *testing.B) {
 		DOME_PRO,
 	)
 
-	tmf, err := New(tmfConfig)
+	tmf, err := NewTMFdb(tmfConfig)
 	if err != nil {
 		panic(err)
 	}

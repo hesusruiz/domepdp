@@ -6,6 +6,7 @@ package pdp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,9 +45,12 @@ type TMFdb struct {
 	RefreshCounter int
 	Dump           bool
 	cloneMutex     sync.Mutex
+	httpClient     *http.Client
 }
 
-func New(config *Config) (*TMFdb, error) {
+var ErrorRedirectsNotAllowed = errors.New("redirects not allowed")
+
+func NewTMFdb(config *Config) (*TMFdb, error) {
 	var err error
 
 	tmf := &TMFdb{
@@ -67,6 +71,15 @@ func New(config *Config) (*TMFdb, error) {
 	// Create the tables if they do not exist
 	if err := createTables(tmf.dbpool); err != nil {
 		return nil, err
+	}
+
+	// Create the http client to send requests to the remore TMF server
+	// This instance is safe for concurrent use and will be reused for performance
+	tmf.httpClient = &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return ErrorRedirectsNotAllowed
+		},
 	}
 
 	return tmf, nil

@@ -5,9 +5,13 @@
 package tmfapi
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -35,6 +39,36 @@ func PrefixInRequest(uri string) bool {
 	return slices.Contains(RoutePrefixes, uri)
 }
 
+type MyLogHandler struct {
+}
+
+func (h *MyLogHandler) Enabled(c context.Context, l slog.Level) bool {
+	return true
+}
+
+func (h *MyLogHandler) Handle(c context.Context, r slog.Record) error {
+	var b strings.Builder
+
+	b.WriteString(r.Message)
+
+	r.Attrs(func(a slog.Attr) bool {
+		b.WriteString(a.String())
+		return true
+	})
+
+	fmt.Println("MYLOG", b.String())
+
+	return nil
+}
+
+func (h *MyLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *MyLogHandler) WithGroup(name string) slog.Handler {
+	return h
+}
+
 func addHttpRoutes(
 	environment pdp.Environment,
 	mux *http.ServeMux,
@@ -42,14 +76,25 @@ func addHttpRoutes(
 	debug bool,
 ) {
 
+	mylogger := &MyLogHandler{}
+
 	logger := slog.New(
 		slogformatter.NewFormatterHandler(
 			slogformatter.HTTPRequestFormatter(false),
 			slogformatter.HTTPResponseFormatter(false),
 		)(
-			slog.Default().Handler(),
+			mylogger,
 		),
 	)
+
+	// logger := slog.New(
+	// 	slogformatter.NewFormatterHandler(
+	// 		slogformatter.HTTPRequestFormatter(false),
+	// 		slogformatter.HTTPResponseFormatter(false),
+	// 	)(
+	// 		slog.Default().Handler(),
+	// 	),
+	// )
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
 	rulesEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug, nil, nil)
@@ -66,26 +111,28 @@ func addHttpRoutes(
 	// This is for the Access Node requests, which are only for reads
 	mux.HandleFunc("GET /api/v1/entities", func(w http.ResponseWriter, r *http.Request) {
 		// TODO: set the processing for these requests
-		replyTMF(w, []byte("{}"))
+		replyTMF(w, []byte("{}"), nil)
 	})
 
 	// Generic LIST handler
-	mux.HandleFunc("GET /{tmfService}/{tmfType}",
+	mux.HandleFunc("GET /{tmfAPI}/{tmfResource}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			start := time.Now()
 
-			tmfService := r.PathValue("tmfService")
-			tmfType := r.PathValue("tmfType")
+			tmfAPI := r.PathValue("tmfAPI")
+			tmfResource := r.PathValue("tmfResource")
 
 			// Retrieve the list of objects according to the parameters specified in the HTTP request
-			logger.Info("GET LIST", "service", tmfService, "type", tmfType)
+			logger.Info("GET LIST", "api", tmfAPI, "type", tmfResource)
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())
 			r.Header.Set("X-Original-Method", "GET")
+			// This is a semantic alias of the operation being requested
+			r.Header.Set("X-Original-Operation", "LIST")
 
-			// tmfObjectList, err := retrieveList(tmf, tmfType, r)
+			// tmfObjectList, err := retrieveList(tmf, tmfResource, r)
 			tmfObjectList, err := pdp.HandleLISTAuth(logger, tmf, rulesEngine, r)
 			if err != nil {
 				errorTMF(w, http.StatusInternalServerError, "error retrieving list", err.Error())
@@ -112,7 +159,11 @@ func addHttpRoutes(
 				return
 			}
 
-			replyTMF(w, out)
+			additionalHeaders := map[string]string{
+				"X-Total-Count": strconv.Itoa(len(listMaps)),
+			}
+
+			replyTMF(w, out, additionalHeaders)
 
 			end := time.Now()
 			latency := end.Sub(start)
@@ -121,19 +172,21 @@ func addHttpRoutes(
 		})
 
 	// Generic GET handler
-	mux.HandleFunc("GET /{tmfService}/{tmfType}/{id}",
+	mux.HandleFunc("GET /{tmfAPI}/{tmfResource}/{id}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			start := time.Now()
 
-			tmfService := r.PathValue("tmfService")
-			tmfType := r.PathValue("tmfType")
+			tmfAPI := r.PathValue("tmfAPI")
+			tmfResource := r.PathValue("tmfResource")
 
-			logger.Info("GET Object", "service", tmfService, "type", tmfType, slog.Any("request", r))
+			logger.Info("GET Object", "api", tmfAPI, "type", tmfResource, slog.Any("request", r))
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())
 			r.Header.Set("X-Original-Method", "GET")
+			// This is a semantic alias of the operation being requested
+			r.Header.Set("X-Original-Operation", "READ")
 
 			tmfObject, err := pdp.HandleREADAuth(logger, tmf, rulesEngine, r)
 			if err != nil {
@@ -142,7 +195,12 @@ func addHttpRoutes(
 				return
 			}
 
-			replyTMF(w, tmfObject.Content)
+			// Add the ETag header with the hash of the TMFObject
+			additionalHeaders := map[string]string{
+				"ETag": tmfObject.ETag(),
+			}
+
+			replyTMF(w, tmfObject.Content, additionalHeaders)
 
 			end := time.Now()
 			latency := end.Sub(start)
@@ -151,19 +209,29 @@ func addHttpRoutes(
 		})
 
 	// Generic POST handler
-	mux.HandleFunc("POST /{tmfService}/{tmfType}",
+	mux.HandleFunc("POST /{tmfAPI}/{tmfResource}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			start := time.Now()
 
-			tmfService := r.PathValue("tmfService")
-			tmfType := r.PathValue("tmfType")
+			tmfAPI := r.PathValue("tmfAPI")
+			tmfResource := r.PathValue("tmfResource")
 
-			logger.Info("POST", "service", tmfService, "type", tmfType, slog.Any("request", r))
+			logger.Info("POST", "api", tmfAPI, "type", tmfResource, slog.Any("request", r))
+
+			// Treat the HUB resource for notifications especially
+			if tmfResource == "hub" {
+				// Log the request
+				logger.Info("creation of HUB for notifications")
+				// TODO: handle the request
+				return
+			}
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())
 			r.Header.Set("X-Original-Method", "POST")
+			// This is a semantic alias of the operation being requested
+			r.Header.Set("X-Original-Operation", "CREATE")
 
 			tmfObject, err := pdp.HandleCREATEAuth(logger, tmf, rulesEngine, r)
 			if err != nil {
@@ -172,7 +240,14 @@ func addHttpRoutes(
 				return
 			}
 
-			replyTMF(w, tmfObject.Content)
+			location := "/" + tmfAPI + "/" + tmfResource + "/" + tmfObject.ID
+
+			// TODO: use Location HTTP header to specify the URI of a newly created resource (POST)
+			additionalHeaders := map[string]string{
+				"Location": location,
+			}
+
+			replyTMF(w, tmfObject.Content, additionalHeaders)
 
 			end := time.Now()
 			latency := end.Sub(start)
@@ -181,19 +256,21 @@ func addHttpRoutes(
 		})
 
 	// Generic PATCH handler
-	mux.HandleFunc("PATCH /{tmfService}/{tmfType}/{id}",
+	mux.HandleFunc("PATCH /{tmfAPI}/{tmfResource}/{id}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			start := time.Now()
 
-			tmfService := r.PathValue("tmfService")
-			tmfType := r.PathValue("tmfType")
+			tmfAPI := r.PathValue("tmfAPI")
+			tmfResource := r.PathValue("tmfResource")
 
-			logger.Info("PATCH", "service", tmfService, "type", tmfType, slog.Any("request", r))
+			logger.Info("PATCH", "api", tmfAPI, "type", tmfResource, slog.Any("request", r))
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())
 			r.Header.Set("X-Original-Method", "PATCH")
+			// This is a semantic alias of the operation being requested
+			r.Header.Set("X-Original-Operation", "UPDATE")
 
 			tmfObject, err := pdp.HandleUPDATEAuth(logger, tmf, rulesEngine, r)
 			if err != nil {
@@ -202,7 +279,12 @@ func addHttpRoutes(
 				return
 			}
 
-			replyTMF(w, tmfObject.Content)
+			// TODO: use Location HTTP header to specify the URI of a newly created resource (POST)
+			additionalHeaders := map[string]string{
+				"Location": "location",
+			}
+
+			replyTMF(w, tmfObject.Content, additionalHeaders)
 
 			end := time.Now()
 			latency := end.Sub(start)
@@ -210,192 +292,4 @@ func addHttpRoutes(
 
 		})
 
-}
-
-func addOldHttpRoutes(
-	environment pdp.Environment,
-	mux *http.ServeMux,
-	tmf *pdp.TMFdb,
-	debug bool,
-) {
-
-	logger := slog.New(
-		slogformatter.NewFormatterHandler(
-			slogformatter.HTTPRequestFormatter(false),
-			slogformatter.HTTPResponseFormatter(false),
-		)(
-			slog.Default().Handler(),
-		),
-	)
-
-	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	rulesEngine, err := pdp.NewPDP(environment, "auth_policies.star", debug, nil, nil)
-	if err != nil {
-		panic(err)
-	}
-
-	// ****************************************************
-	// Set the routes needed for acting as a PIP (reverse proxy)
-	//
-	// Many routes share the same handlers, thanks to the consistency of the TMF APIs and underlying data model.
-	// We have one for all LIST requests (get several objects), and another for GET requests (get one object).
-
-	// The LISTING handlers for Category, Catalog and ProductOffering
-	mux.HandleFunc("GET /catalog/category", handleGETlist("category", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /catalog/productOffering", handleGETlist("productOffering", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /catalog/catalog", handleGETlist("catalog", logger, tmf, rulesEngine))
-
-	// The GET one object handlers for all objects of interest
-	mux.HandleFunc("GET /catalog/category/{id}", handleGET("category", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /catalog/productOffering/{id}", handleGET("productOffering", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /catalog/productSpecification/{id}", handleGET("productSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /catalog/productOfferingPrice/{id}", handleGET("productOfferingPrice", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /service/serviceSpecification/{id}", handleGET("serviceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /resource/resourceSpecification/{id}", handleGET("resourceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("GET /party/organization/{id}", handleGET("organization", logger, tmf, rulesEngine))
-
-	// The POST handlers
-	mux.HandleFunc("POST /catalog/category", handlePOST("category", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /catalog/productOffering", handlePOST("productOffering", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /catalog/productSpecification", handlePOST("productSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /catalog/productOfferingPrice", handlePOST("productOfferingPrice", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /service/serviceSpecification", handlePOST("serviceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /resource/resourceSpecification", handlePOST("resourceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("POST /party/organization", handlePOST("organization", logger, tmf, rulesEngine))
-
-	// The PATCH handlers
-	mux.HandleFunc("PATCH /catalog/category/{id}", handlePATCH("category", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /catalog/productOffering/{id}", handlePATCH("productOffering", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /catalog/productSpecification/{id}", handlePATCH("productSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /catalog/productOfferingPrice/{id}", handlePATCH("productOfferingPrice", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /service/serviceSpecification/{id}", handlePATCH("serviceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /resource/resourceSpecification/{id}", handlePATCH("resourceSpecification", logger, tmf, rulesEngine))
-	mux.HandleFunc("PATCH /party/organization/{id}", handlePATCH("organization", logger, tmf, rulesEngine))
-
-	//
-	// End of the routes needed for acting as a PIP
-	// ****************************************************
-
-	// ****************************************************
-	// Set the route needed for acting as a pure PDP.
-	// In this mode, an external PIP will call us.
-	// This route can also be used by any application or service asking for authotization info
-	mux.HandleFunc("GET /authorize/v1/policies/authz", pdp.HandleGETAuthorization(logger, tmf, rulesEngine))
-
-}
-
-// handleGETlist retrieves a list of objects, subject to filtering
-func handleGETlist(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, rulesEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-
-		start := time.Now()
-
-		// For the moment, a LIST request does not go through authorization, and is fully public
-		_ = rulesEngine
-
-		// Retrieve the list of objects according to the parameters specified in the HTTP request
-		logger.Info("GET LIST", "type", tmfType)
-
-		// Set the proper fields in the request
-		r.Header.Set("X-Original-URI", r.URL.RequestURI())
-		r.Header.Set("X-Original-Method", "GET")
-
-		// tmfObjectList, err := retrieveList(tmf, tmfType, r)
-		tmfObjectList, err := pdp.HandleLISTAuth(logger, tmf, rulesEngine, r)
-		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
-			logger.Error("retrieving", slogor.Err(err))
-			return
-		}
-
-		// Create the output list with the map content fields, ready for marshalling
-		var listMaps = []map[string]any{}
-		for _, v := range tmfObjectList {
-			listMaps = append(listMaps, v.ContentMap)
-		}
-
-		// We must send a randomly ordered list, to preserve fairness in the presentation of the offerings
-		rand.Shuffle(len(listMaps), func(i, j int) {
-			listMaps[i], listMaps[j] = listMaps[j], listMaps[i]
-		})
-
-		// Create the JSON representation of the list of objects
-		out, err := json.Marshal(listMaps)
-		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error marshalling list", err.Error())
-			logger.Error("error marshalling list", slogor.Err(err))
-			return
-		}
-
-		replyTMF(w, out)
-
-		end := time.Now()
-		latency := end.Sub(start)
-		slog.Info("GET LIST", "latency", slog.Duration("latency", latency))
-
-	}
-}
-
-// handleGET retrieves a single TMF object, subject to authorization policy rules
-func handleGET(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, rulesEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-
-		logger.Info("GET", "type", tmfType, slog.Any("request", r))
-
-		// Set the proper fields in the request
-		r.Header.Set("X-Original-URI", r.URL.RequestURI())
-		r.Header.Set("X-Original-Method", "GET")
-
-		tmfObject, err := pdp.HandleREADAuth(logger, tmf, rulesEngine, r)
-		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
-			slog.Error("retrieving", slogor.Err(err))
-			return
-		}
-
-		replyTMF(w, tmfObject.Content)
-
-	}
-}
-
-func handlePOST(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, rulesEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-
-		logger.Info("POST", "type", tmfType, slog.Any("request", r))
-
-		// Set the proper fields in the request
-		r.Header.Set("X-Original-URI", r.URL.RequestURI())
-		r.Header.Set("X-Original-Method", "POST")
-
-		tmfObject, err := pdp.HandleCREATEAuth(logger, tmf, rulesEngine, r)
-		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
-			slog.Error("retrieving", slogor.Err(err))
-			return
-		}
-
-		replyTMF(w, tmfObject.Content)
-
-	}
-}
-
-func handlePATCH(tmfType string, logger *slog.Logger, tmf *pdp.TMFdb, rulesEngine *pdp.PDP) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-
-		logger.Info("PATCH", "type", tmfType, slog.Any("request", r))
-
-		// Set the proper fields in the request
-		r.Header.Set("X-Original-URI", r.URL.RequestURI())
-		r.Header.Set("X-Original-Method", "PATCH")
-
-		tmfObject, err := pdp.HandleUPDATEAuth(logger, tmf, rulesEngine, r)
-		if err != nil {
-			errorTMF(w, http.StatusInternalServerError, "error retrieving", err.Error())
-			slog.Error("retrieving", slogor.Err(err))
-			return
-		}
-
-		replyTMF(w, tmfObject.Content)
-
-	}
 }

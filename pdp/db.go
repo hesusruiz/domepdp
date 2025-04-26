@@ -248,7 +248,7 @@ func (tmf *TMFdb) UpsertTMFObject(dbconn *sqlite.Conn, po *TMFObject) (err error
 	}
 
 	// slog.Debug("Inserted row", "id", po.ID)
-	fmt.Println("Upsert: row inserted", "id", po.ID)
+	slog.Debug("Upsert: row inserted", "id", po.ID)
 
 	return nil
 }
