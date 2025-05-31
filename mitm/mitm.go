@@ -36,14 +36,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/tmfapi"
+	"github.com/hesusruiz/domeproxy/tmfproxy"
 	"github.com/smarty/cproxy/v2"
 	"gitlab.com/greyxor/slogor"
 )
 
 func MITMServerHandler(
 	config *Config,
-	pdpServer string,
 ) (execute func() error, interrupt func(error), err error) {
 
 	// Read the passworf file
@@ -57,6 +56,7 @@ func MITMServerHandler(
 	// This is the man-in-the-middle proxy that will intercept the requests to the TMF APIs, so they can be served locally from the
 	// local database, or updated if the local copy is not fresh anymore.
 	// In addition, we can test the authorization mechanism for each API
+	pdpServer := "http://localhost" + config.PDPAddress
 	mitmProxy := createMitmProxy(config.CaCertFile, config.CaKeyFile, pdpServer)
 
 	// This proxy just connects the client with the server and does not look inside the requests/responses, because they are encrypted.
@@ -305,7 +305,7 @@ func (p *mitmProxy) proxyConnect(w http.ResponseWriter, proxyReq *http.Request) 
 		var resp *http.Response
 
 		// We will intercept the requests to the TMForum APIs
-		if tmfapi.PrefixInRequest(r.URL.Path) {
+		if tmfproxy.PrefixInRequest(r.URL.Path) {
 
 			// Take the original request and change its destination to be forwarded
 			// to the PDP server.

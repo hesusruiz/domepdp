@@ -11,7 +11,6 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +18,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	conf "github.com/hesusruiz/domeproxy/config"
 
 	"gitlab.com/greyxor/slogor"
 	starjson "go.starlark.net/lib/json"
@@ -76,26 +75,28 @@ type PDP struct {
 
 	// environment is the run-time environment (production or development) where the PDP executes.
 	// Some things behave differently by default, like logging level.
-	environment Environment
+	// environment Environment
+	config *conf.Config
 
-	// The name of the file where the policy rules resides.
+	// The name of the file where the policy rules reside.
 	scriptname string
 
-	// The function used at runtime to read the files. If not specified by the caller,
-	// a default implementation is used, which uses the file system.
-	readFileFun func(fileName string) ([]byte, bool, error)
+	// The function used at runtime to read the files.
+	// If not specified by the caller, a default implementation is used, which uses the file system.
+	// readFileFun func(fileName string) (entry *FileEntry, err error)
 
 	// The public key used to verify the Access Tokens. In DOME they belong to the Verifier,
 	// and the PDP retrieves it dynamically depending on the environment.
 	// The caller is able to provide a function to retrieve the key from a different place.
 	verifierJWK        *jose.JSONWebKey
-	verificationKeyFun func(environment Environment) (*jose.JSONWebKey, error)
+	verificationKeyFun func(config *conf.Config) (*jose.JSONWebKey, error)
 
 	debug bool
 
-	// The file cache to read the policy files. Modifications to the original file
-	// are picked automatically according to a freshness policy.
-	fileCache sync.Map
+	// The file cache to read the policy and other files. Modifications to the original file
+	// are picked up automatically according to a freshness policy.
+	// fileCache    sync.Map
+	fileCache *conf.SimpleFileCache
 
 	// The pool of instances of the policy execution engines, to minimize startup
 	// and teardown overheads.
@@ -104,36 +105,37 @@ type PDP struct {
 	// Goroutines using old versions will run until completion, and new ones will pick
 	// the new version of the policies
 	threadPool sync.Pool
+
+	// The http Client to retrieve the policies from a remote server if configured to do so.
+	httpClient *http.Client
 }
 
 // NewPDP creates a new PDP instance.
-//   - environment is the run-time environment (development or production)
+//   - environment is the runtime environment (development or production)
 //   - fileName specifies the file with the policies
-//     debug enables more logging information
+//   - debug enables more logging information
 //   - readFileFun is a user-provided function to read the file from where it is stored. If not
 //     provided, the default function is used, which reads from the disk and using a cache
 //     to improve performance.
 //   - verificationKeyFunc is a user-provided function to supply the verification key for
 //     access tokens. If not provided, the default function is used which queries the Verifier
-//   - JWKS endpoint for the public key of the Verifier.
-func NewPDP(environment Environment,
-	fileName string,
-	debug bool,
-	readFileFun func(fileName string) ([]byte, bool, error),
-	verificationKeyFunc func(environment Environment) (*jose.JSONWebKey, error),
+//     JWKS endpoint for the public key of the Verifier.
+func NewPDP(
+	config *conf.Config,
+	readFileFun func(fileName string) (fentry *conf.FileEntry, err error),
+	verificationKeyFunc func(config *conf.Config) (*jose.JSONWebKey, error),
 ) (*PDP, error) {
 
 	m := &PDP{}
-	m.environment = environment
-	m.scriptname = fileName
-	m.fileCache = sync.Map{}
+	m.config = config
+	m.scriptname = config.PolicyFileName
+	// m.fileCache = sync.Map{}
 
-	if readFileFun == nil {
-		m.readFileFun = m.defaultReadFileFun
-	} else {
-		m.readFileFun = readFileFun
-	}
+	// Create the file cache and initialize it with the policy file.
+	m.fileCache = conf.NewSimpleFileCache(nil)
+	m.fileCache.Get(config.PolicyFileName)
 
+	// Set either the user-supplied key retrieval function or the default one.
 	if verificationKeyFunc == nil {
 		m.verificationKeyFun = m.defaultVerificationKey
 	} else {
@@ -144,7 +146,7 @@ func NewPDP(environment Environment,
 	// error in environment configuration as early as possible (eg, the Verifier is not running).
 	// TODO: provide for refresh of the key without restarting the PDP
 	var err error
-	m.verifierJWK, err = m.verificationKeyFun(environment)
+	m.verifierJWK, err = m.verificationKeyFun(config)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving verification key: %w", err)
 	}
@@ -152,14 +154,19 @@ func NewPDP(environment Environment,
 	// Create the pool of parsed and compiled Starlark policy rules.
 	m.threadPool = sync.Pool{
 		New: func() any {
-			// The Pool's New function should generally only return pointer
-			// types, since a pointer can be put into the return interface
-			// value without an allocation:
 			return m.BufferedParseAndCompileFile(m.scriptname)
 		},
 	}
 
-	m.debug = debug
+	m.debug = config.Debug
+
+	// We use an http.Client with a timeout of 10 seconds and no redirects.
+	m.httpClient = &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return ErrorRedirectsNotAllowed
+		},
+	}
 
 	return m, nil
 }
@@ -167,10 +174,10 @@ func NewPDP(environment Environment,
 // defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
 //
 // It receives the runtime environment, enabling a different mechanism depending on it.
-func (m *PDP) defaultVerificationKey(environment Environment) (*jose.JSONWebKey, error) {
+func (m *PDP) defaultVerificationKey(config *conf.Config) (*jose.JSONWebKey, error) {
 
 	// Retrieve the OpenID configuration from the Verifier
-	oid, err := NewOpenIDConfig(environment)
+	oid, err := NewOpenIDConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +195,7 @@ func (m *PDP) defaultVerificationKey(environment Environment) (*jose.JSONWebKey,
 
 func (m *PDP) VerificationJWK() (key *jose.JSONWebKey, err error) {
 	if m.verifierJWK == nil {
-		m.verifierJWK, err = m.verificationKeyFun(m.environment)
+		m.verifierJWK, err = m.verificationKeyFun(m.config)
 		return m.verifierJWK, err
 	}
 	return m.verifierJWK, nil
@@ -207,6 +214,7 @@ type threadEntry struct {
 	authenticateFunction *st.Function
 	authorizeFunction    *st.Function
 	scriptname           string
+	scriptHash           uint64
 }
 
 // BufferedParseAndCompileFile reads a file with Starlark code and compiles it, storing the resulting global
@@ -215,9 +223,11 @@ type threadEntry struct {
 // BufferedParseAndCompileFile can be called several times and will perform a new compilation every time,
 // creating a new Thread and so the old ones will never be called again and eventually will be disposed.
 func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
-	slog.Debug("===> BufferedParseAndCompileFile")
+	slog.Debug("BufferedParseAndCompileFile Start")
 	var err error
 
+	// The Starlark thread will be created for each invocation of the PDP in a local variable
+	// to avoid concurrency problems. The thread is not goroutine safe, but the globals are.
 	te := &threadEntry{}
 	te.scriptname = scriptname
 
@@ -237,11 +247,21 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 	te.predeclared = st.StringDict{}
 	te.predeclared["input"] = StarTMFMap{}
 
-	src, _, err := m.readFileFun(scriptname)
+	// Get the file from the cache, which will be up to date according to its freshness policy.
+	entry, err := m.fileCache.Get(scriptname)
 	if err != nil {
 		slog.Error("reading script", slogor.Err(err), "file", scriptname)
 		return nil
 	}
+
+	// entry, err := m.readFileFun(scriptname)
+	// if err != nil {
+	// 	slog.Error("reading script", slogor.Err(err), "file", scriptname)
+	// 	return nil
+	// }
+
+	te.scriptHash = entry.FileHash
+	src := entry.Content
 
 	// Parse and execute the top-level commands in the script file
 	// The globals are thread-local and not process-global
@@ -251,7 +271,8 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 		return nil
 	}
 
-	// Make sure that the global environment is frozen so the Startlark
+	// Make sure that the global environment is frozen so the Startlark script cannot
+	// modify it. This is important for security and to avoid concurrency problems.
 	te.globals.Freeze()
 
 	// The module has to define a function called 'authorize', which will be invoked
@@ -261,9 +282,49 @@ func (m *PDP) BufferedParseAndCompileFile(scriptname string) *threadEntry {
 		return nil
 	}
 
-	slog.Debug("<=== BufferedParseAndCompileFile")
+	slog.Debug("BufferedParseAndCompileFile End")
 	return te
 
+}
+
+func (m *PDP) Reset(te *threadEntry) error {
+
+	// Read the file again, to check if it has changed.
+	// entry, err := m.readFileFun(te.scriptname)
+	entry, err := m.fileCache.Get(te.scriptname)
+	if err != nil {
+		slog.Error("reading script", slogor.Err(err), "file", te.scriptname)
+		return nil
+	}
+
+	// If hashes are the same, we do not need to recompile the file.
+	if entry.FileHash == te.scriptHash {
+		return nil
+	}
+
+	// The file has changed, so we recompile it.
+	src := entry.Content
+
+	// Parse and execute the top-level commands in the script file
+	// The globals are thread-local and not process-global
+	te.globals, err = st.ExecFileOptions(&syntax.FileOptions{}, te.thread, te.scriptname, src, te.predeclared)
+	if err != nil {
+		slog.Error("error compiling Starlark program", slogor.Err(err))
+		return err
+	}
+
+	// Make sure that the global environment is frozen so the Startlark script cannot
+	// modify it. This is important for security and to avoid concurrency problems.
+	te.globals.Freeze()
+
+	// The module has to define a function called 'authorize', which will be invoked
+	// for each request to access protected resources.
+	te.authorizeFunction, err = getGlobalFunction(te.globals, "authorize")
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // getGlobalFunction retrieves a Callable from the supplied globals dictionary.
@@ -288,243 +349,306 @@ func getGlobalFunction(globals st.StringDict, funcName string) (*st.Function, er
 	return starFunction, nil
 }
 
-// fileEntry implements a file cache to improve performance while being able to pick newer
-// versions of the rules in a reasonable time (20 secods by default).
-type fileEntry struct {
-	name         string
-	entryUpdated time.Time
-	fileModTime  time.Time
-	content      []byte
-}
+// // defaultReadDiskFileFun reads the given file from disk, using a sync.Map to store it
+// // It is safe for concurrent use.
+// func (m *PDP) defaultReadDiskFileFun(fileName string) (*FileEntry, error) {
 
-const maxFileSize = 1024 * 1024
-const freshness = 20 * time.Second
+// 	now := time.Now()
 
-// defaultReadFileFun reads the given file from disk, using a sync.Map to store it
-// It is safe for concurrent use.
-func (m *PDP) defaultReadFileFun(fileName string) ([]byte, bool, error) {
+// 	// Try to get the file from the cache
+// 	fe, found := m.fileCache.Load(fileName)
+// 	if found {
+// 		entry := fe.(*FileEntry)
 
-	now := time.Now()
+// 		// Return the entry if it is fresh enough.
+// 		if now.Sub(entry.EntryUpdated) < freshnessForDiskFiles {
+// 			slog.Debug("readFileIfNew", "file", fileName, "msg", "found and cache entry is fresh")
+// 			return entry, nil
+// 		}
+// 		slog.Debug("readFileIfNew", "file", fileName, "msg", "found but entry is NOT fresh")
+// 	}
 
-	// Try to get the file from the cache
-	fe, found := m.fileCache.Load(fileName)
-	if found {
-		entry := fe.(*fileEntry)
+// 	// We are here because either the entry was not found or is not fresh.
+// 	// We get the file info, to check if it was modified.
+// 	fileInfo, err := os.Stat(fileName)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("readFileIfNew: error checking file %s: %w", fileName, err)
+// 	} else if fileInfo.Mode().IsDir() {
+// 		// We cannot read a directory
+// 		return nil, fmt.Errorf("readFileIfNew: file %s is a directory, not a file", fileName)
+// 	}
 
-		// Return the entry if it is fresh enough.
-		if now.Sub(entry.entryUpdated) < freshness {
-			slog.Debug("readFileIfNew", "file", fileName, "msg", "found and cache entry is fresh")
-			return entry.content, true, nil
-		}
-		slog.Debug("readFileIfNew", "file", fileName, "msg", "found but entry is NOT fresh")
-	}
+// 	// Check if the size is "reasonable" to be loaded in the cache. Default is 1MB, enogh for many policies.
+// 	if fileInfo.Size() > maxFileSize {
+// 		return nil, fmt.Errorf("readFileIfNew: file %s is too big", fileName)
+// 	}
 
-	// We are here because either the entry was not found or is not fresh.
-	// Get the file info, to check if it was modified.
-	// We discard directories.
-	fileInfo, err := os.Stat(fileName)
-	if err != nil {
-		return nil, false, fmt.Errorf("readFileIfNew: error checking file %s: %w", fileName, err)
-	} else if fileInfo.Mode().IsDir() {
-		return nil, false, fmt.Errorf("readFileIfNew: file %s is a directory, not a file", fileName)
-	}
+// 	modifiedAt := fileInfo.ModTime()
 
-	// Check if the size is "reasonable" to be loaded in the cache
-	if fileInfo.Size() > maxFileSize {
-		return nil, false, fmt.Errorf("readFileIfNew: file %s is too big", fileName)
-	}
+// 	// If not found, read the file, set in the cache and return the file.
+// 	if !found {
+// 		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry not found in cache")
+// 		content, err := os.ReadFile(fileName)
+// 		if err != nil {
+// 			return nil, err
+// 		}
 
-	modifiedAt := fileInfo.ModTime()
+// 		// Add or replace the content of the file cache
+// 		entry := &FileEntry{
+// 			Name:         fileName,
+// 			EntryUpdated: now,
+// 			FileModTime:  modifiedAt,
+// 			Content:      content,
+// 			FileHash:     maphash.Bytes(seed, content),
+// 		}
 
-	// If not found, read the file, set in the cache and return the file.
-	if !found {
-		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry not found in cache")
-		content, err := os.ReadFile(fileName)
-		if err != nil {
-			return nil, false, err
-		}
+// 		m.fileCache.Store(fileName, entry)
 
-		// Add or replace the content of the file cache
-		entry := &fileEntry{
-			name:         fileName,
-			entryUpdated: now,
-			fileModTime:  modifiedAt,
-			content:      content,
-		}
+// 		return entry, nil
 
-		m.fileCache.Store(fileName, entry)
+// 	}
 
-		return content, false, nil
+// 	// The entry was found in the cache, but it may be stale.
+// 	entry := fe.(*FileEntry)
 
-	}
+// 	if entry.FileModTime.Before(modifiedAt) {
 
-	// The entry was found in the cache, but it may be stale.
-	entry := fe.(*fileEntry)
+// 		// The entry in the cache is old, so we read again the file.
+// 		content, err := os.ReadFile(fileName)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("readFileIfNew: error reading file %s: %w", fileName, err)
+// 		}
 
-	if entry.fileModTime.Before(modifiedAt) {
+// 		// Add to the cache. There is only one instance of each file in the cache.
+// 		entry := &FileEntry{
+// 			Name:         fileName,
+// 			EntryUpdated: now,
+// 			FileModTime:  modifiedAt,
+// 			Content:      content,
+// 			FileHash:     maphash.Bytes(seed, content),
+// 		}
 
-		// Read the file
-		content, err := os.ReadFile(fileName)
-		if err != nil {
-			return nil, false, fmt.Errorf("readFileIfNew: error reading file %s: %w", fileName, err)
-		}
+// 		slog.Debug("readFileIfNew", "file", fileName, "msg", "file modification is later than in entry")
+// 		m.fileCache.Store(fileName, entry)
+// 		return entry, nil
 
-		// Add to the cache
-		entry := &fileEntry{
-			name:         fileName,
-			entryUpdated: now,
-			fileModTime:  modifiedAt,
-			content:      content,
-		}
+// 	} else {
 
-		slog.Debug("readFileIfNew", "file", fileName, "msg", "file modification is later than in entry")
-		m.fileCache.Store(fileName, entry)
-		return content, false, nil
+// 		// The entry in the cache is still valid, update the timestamp and return the file.
+// 		// Updating the timestamp extends the TTL of the entry.
+// 		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry was not fresh but still valid")
+// 		entry.EntryUpdated = now
 
-	} else {
+// 		// And return contents
+// 		return entry, nil
+// 	}
 
-		// The entry in the cache is still valid, update the timestamp and return the file.
-		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry was not fresh but still valid")
-		entry.entryUpdated = now
+// }
 
-		// And return contents
-		return entry.content, true, nil
-	}
+// // defaultReadServerFileFun implements a simple file cache to read files from an http server.
+// // It is intended for a small number of well-known files, like the configuration or policy files.
+// // In this use case, we do not need an eviction system, as the number of files is small and
+// // the cache is not expected to grow indefinitely.
+// // It is also used mostly for reads with very few writes, which happen only when the file is modified.
+// // The cache can be used concurrently, so we use a sync.Map, which is very good for reads and acceptable for writes.
+// func (m *PDP) defaultReadServerFileFun(fileName string) (*FileEntry, error) {
 
-}
+// 	now := time.Now()
 
-// TakeAuthnDecision is called when a decision should be taken for either Athentication or Authorization.
+// 	// Try to get the file from the cache
+// 	fe, found := m.fileCache.Load(fileName)
+// 	if found {
+
+// 		// Return the entry if it is fresh enough, or read it again if it is not.
+
+// 		entry := fe.(*FileEntry)
+// 		if now.Before(entry.expires) {
+
+// 			// We return directly the entry in the cache if it is fresh enough.
+// 			slog.Debug("readFileIfNew", "file", fileName, "msg", "found and cache entry is fresh")
+// 			return entry, nil
+
+// 		} else {
+
+// 			// The entry in the cache is old, so we read again the file.
+// 			slog.Debug("readFileIfNew", "file", fileName, "msg", "found but entry is NOT fresh")
+// 			req, err := http.NewRequest("GET", fileName, nil)
+// 			if err != nil {
+// 				// An error creating the request is strange, but we return the entry in the cache
+// 				// and log the error, so the system can continue working, even with stale data.
+// 				slog.Error("readFileIfNew", "file", fileName, "msg", "error creating request", slogor.Err(err))
+// 				return entry, nil
+// 			}
+
+// 			// Add to the request the If-None-Match header if Etag was present in the previous response from the server
+// 			if entry.Etag != "" {
+// 				req.Header.Add("If-None-Match", entry.Etag)
+// 			}
+
+// 			resp, err := m.httpClient.Do(req)
+// 			if err != nil {
+// 				// Log the error and return the entry in the cache, so the system can continue working, even with stale data.
+// 				slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slogor.Err(err))
+// 				return entry, nil
+// 			}
+// 			defer resp.Body.Close()
+
+// 			// If the server returns a 304 Not Modified, we return the entry in the cache
+// 			if resp.StatusCode == http.StatusNotModified {
+// 				slog.Debug("readFileIfNew", "file", fileName, "msg", "file not modified")
+
+// 				// Set the Etag header if present in the response from the server
+// 				if etag := resp.Header.Get("Etag"); etag != "" {
+// 					entry.Etag = etag
+// 				}
+
+// 				// Refresh the expires header if present in the response from the server
+// 				if expires := resp.Header.Get("Expires"); expires != "" {
+// 					entry.expires, err = time.Parse(time.RFC1123, expires)
+// 					if err != nil {
+// 						// If we cannot parse the Expires header, we just log the error and return the entry in the cache,
+// 						// so the system can continue working, even with stale data.
+// 						slog.Error("readFileIfNew", "file", fileName, "msg", "error parsing Expires header", slogor.Err(err))
+// 					}
+// 				}
+
+// 				// Update the entry in the cache with the new Etag and Expires headers
+// 				// We do not update the content of the file, as it was not modified.
+// 				// For the caller, the content is the same as before so we return found = true
+// 				m.fileCache.Store(fileName, entry)
+// 				return entry, nil
+// 			}
+
+// 			// Other status codes are errors, so we return the entry in the cache, logging the error
+// 			// and the status code.
+// 			if resp.StatusCode != http.StatusOK {
+// 				slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slog.Int("status", resp.StatusCode))
+// 				return entry, nil
+// 			}
+
+// 			content, err := io.ReadAll(resp.Body)
+// 			if err != nil {
+// 				// If we cannot read the file, we return the entry in the cache, logging the error
+// 				// so the system can continue working, even with stale data.
+// 				slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slogor.Err(err))
+// 				return entry, nil
+// 			}
+
+// 			// Check the size of the file
+// 			if len(content) > maxFileSize {
+// 				// If the file is too big, we return the entry in the cache, logging the error
+// 				// so the system can continue working, even with stale data.
+// 				slog.Error("readFileIfNew", "file", fileName, "msg", "file is too big", slog.Int("size", len(content)))
+// 				// We do not return the content of the file, as it is too big.
+// 				return entry, nil
+// 			}
+
+// 			// Store the new entry with the content of the file
+// 			entry := &FileEntry{
+// 				Name:         fileName,
+// 				EntryUpdated: now,
+// 				Content:      content,
+// 				FileHash:     maphash.Bytes(seed, content),
+// 			}
+
+// 			// Add the Etag header if present in the response from the server
+// 			if etag := resp.Header.Get("Etag"); etag != "" {
+// 				entry.Etag = etag
+// 			}
+// 			// Set the expires header if present in the response from the server
+// 			if expires := resp.Header.Get("Expires"); expires != "" {
+// 				entry.expires, err = time.Parse(time.RFC1123, expires)
+// 				if err != nil {
+// 					// If we cannot parse the Expires header, set the default freshness
+// 					entry.expires = time.Now().Add(freshnessForServerFiles)
+// 				}
+// 			} else {
+// 				// If the Expires header is not present, set the default freshness
+// 				entry.expires = time.Now().Add(freshnessForServerFiles)
+// 			}
+
+// 			slog.Debug("readFileIfNew", "file", fileName, "msg", "file refreshed from the server")
+
+// 			// Store the entry in the cache and return the content, with found = false because the contents changed
+// 			m.fileCache.Store(fileName, entry)
+// 			return entry, nil
+
+// 		}
+
+// 	} else {
+
+// 		// The entry was not found, read the file from the server, set in the cache and return the file.
+// 		// In we found any error, we can not do anything except log it and return an error.
+// 		slog.Debug("readFileIfNew", "file", fileName, "msg", "entry not found in cache")
+
+// 		// Request the file from the server.
+// 		req, err := http.NewRequest("GET", fileName, nil)
+// 		resp, err := m.httpClient.Do(req)
+// 		if err != nil {
+// 			// If we cannot read the file, we return an error after logging it
+// 			slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slogor.Err(err))
+// 			return nil, err
+// 		}
+// 		defer resp.Body.Close()
+
+// 		if resp.StatusCode != http.StatusOK {
+// 			// Other status codes are errors, and we can not do anything except log an error
+// 			// and return the error.
+// 			slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slog.Int("status", resp.StatusCode))
+// 			return nil, fmt.Errorf("readFileIfNew: error reading file %s: %w", fileName, err)
+// 		}
+
+// 		content, err := io.ReadAll(resp.Body)
+// 		if err != nil {
+// 			// If we cannot read the file, we return an error after logging it
+// 			slog.Error("readFileIfNew", "file", fileName, "msg", "error reading file", slogor.Err(err))
+// 			return nil, err
+// 		}
+
+// 		// Check the size of the file
+// 		if len(content) > maxFileSize {
+// 			// If the file is too big, we return an error after logging it
+// 			slog.Error("readFileIfNew", "file", fileName, "msg", "file is too big", slog.Int("size", len(content)))
+// 			return nil, fmt.Errorf("readFileIfNew: file %s is too big", fileName)
+// 		}
+
+// 		// Store the entry with the content of the file
+// 		entry := &FileEntry{
+// 			Name:         fileName,
+// 			EntryUpdated: now,
+// 			Content:      content,
+// 			FileHash:     maphash.Bytes(seed, content),
+// 		}
+
+// 		// Add the Etag header if present in the response from the server
+// 		if etag := resp.Header.Get("Etag"); etag != "" {
+// 			entry.Etag = etag
+// 		}
+
+// 		// Set the expires header if present in the response from the server
+// 		if expires := resp.Header.Get("Expires"); expires != "" {
+// 			entry.expires, err = time.Parse(time.RFC1123, expires)
+// 			if err != nil {
+// 				// If we cannot parse the Expires header, set the default freshness
+// 				entry.expires = time.Now().Add(freshnessForServerFiles)
+// 			}
+// 		} else {
+// 			entry.expires = time.Now().Add(freshnessForServerFiles)
+// 		}
+
+// 		// Store the entry in the cache and return the content, with found = false because the contents changed
+// 		m.fileCache.Store(fileName, entry)
+// 		return entry, nil
+
+// 	}
+
+// }
+
+// TakeAuthnDecision is called when a decision should be taken for either Authentication or Authorization.
 // The type of decision to evaluate is passed in the Decision argument. The rest of the arguments contain the information required
 // for the decision. They are:
 // - the Verifiable Credential with the information from the caller needed for the decision
 // - the protected resource that the caller identified in the Credential wants to access
-
-func (m *PDP) TakeAuthnDecisionOPAStyle(decision Decision, r *http.Request, tokString string, tmfObject *TMFObject) (bool, error) {
-	var err error
-
-	// Verify the token and extract the claims.
-	// A verification error stops processing. But an empy claim string '{}' is valid, unless the policies say otherwise later.
-	mapClaims, _, err := m.getClaimsFromToken(tokString)
-	if err != nil {
-		return false, err
-	}
-
-	// The first argument to the rule engine will be the Request object, which will be composed of:
-	//   - Some relevant fields of the received http.Request
-	//   - Some fields of the Access Token
-	requestArgument, err := StarDictFromHttpRequest(r)
-	if err != nil {
-		return false, err
-	}
-
-	// Add the type of TMF object and its id as top-level properties of the Request object
-	tmfType := st.String(r.PathValue(("type")))
-	tmfId := st.String(r.PathValue("id"))
-
-	requestArgument.SetKey(st.String("tmf_entity"), st.String(tmfType))
-	requestArgument.SetKey(st.String("tmf_id"), st.String(tmfId))
-
-	// Enrich the http variable with other fields to make easier write rules
-	var action string
-	switch r.Method {
-	case "GET":
-		action = "READ"
-	case "POST":
-		action = "CREATE"
-	case "PUT":
-		action = "UPDATE"
-	case "DELETE":
-		action = "DELETE"
-	}
-
-	requestArgument.SetKey(st.String("action"), st.String(action))
-
-	// Setup some fields about the remote User
-	userOI := jpath.GetString(mapClaims, "vc.credentialSubject.mandate.mandator.organizationIdentifier")
-	userDict := &st.Dict{}
-	userDict.SetKey(st.String("organizationIdentifier"), st.String(userOI))
-
-	if userOI == "" || tmfObject == nil {
-		userDict.SetKey(st.String("isOwner"), st.Bool(false))
-	} else {
-		userDict.SetKey(st.String("isOwner"), st.Bool(userOI == tmfObject.OrganizationIdentifier))
-	}
-
-	requestArgument.SetKey(st.String("user"), userDict)
-
-	// The second argument will be the Access Token, representing the User and his/her powers
-	tokenArgument, err := mapToStarlark(mapClaims)
-	if err != nil {
-		return false, err
-	}
-
-	// The third argument will be the TMF object that the User wants to access
-	var oMap map[string]any
-	if tmfObject == nil {
-		oMap = map[string]any{}
-		oMap["type"] = "unknown"
-		oMap["organizationIdentifier"] = "unknown"
-	} else {
-		oMap = tmfObject.ContentMap
-		oMap["type"] = tmfObject.Type
-		oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
-	}
-
-	// tmfArgument, err := mapToStarlark(oMap)
-	// if err != nil {
-	// 	return false, err
-	// }
-
-	tmfArgument := StarTMFMap(oMap)
-
-	// Get a Starlark Thread to execute the evaluation of the policies
-	ent := m.threadPool.Get()
-	if ent == nil {
-		return false, fmt.Errorf("getting a thread entry from pool")
-	}
-	defer m.threadPool.Put(ent)
-
-	te := ent.(*threadEntry)
-	if te == nil {
-		return false, fmt.Errorf("getting a thread entry from pool")
-	}
-
-	te.thread.SetLocal("httprequest", r)
-
-	// Create the input arguments
-
-	// Build the arguments to the StarLark function
-	var args st.Tuple
-	args = append(args, requestArgument) // The http.Request
-	args = append(args, tokenArgument)   // The LEARCredential inside the Access Token
-	args = append(args, tmfArgument)     // The TMForum object, on GETs. Nothing in other requests
-
-	// Call the corresponding function in the Starlark Thread
-	var result st.Value
-	if decision == Authenticate {
-		// Call the 'authenticate' funcion
-		result, err = st.Call(te.thread, te.authenticateFunction, args, nil)
-	} else {
-		// Call the 'authorize' function
-		result, err = st.Call(te.thread, te.authorizeFunction, args, nil)
-	}
-
-	if err != nil {
-		fmt.Printf("rules ERROR: %s\n", err.(*st.EvalError).Backtrace())
-		return false, fmt.Errorf("error calling function: %w", err)
-	}
-
-	// Check that the value returned is of the correct type (boolean)
-	resultType := result.Type()
-	if resultType != "bool" {
-		err := fmt.Errorf("function returned wrong type: %v", resultType)
-		return false, err
-	}
-
-	// Return the value as a Go boolean
-	return bool(result.(st.Bool).Truth()), nil
-
-}
 
 func (m *PDP) TakeAuthnDecision(decision Decision, input StarTMFMap) (bool, error) {
 	var err error
@@ -539,6 +663,12 @@ func (m *PDP) TakeAuthnDecision(decision Decision, input StarTMFMap) (bool, erro
 	te := ent.(*threadEntry)
 	if te == nil {
 		return false, fmt.Errorf("invalid entry type in the pool")
+	}
+
+	// Check if the thread is still valid. If not, we need to recompile the file.
+	err = m.Reset(te)
+	if err != nil {
+		return false, err
 	}
 
 	// We mutate the predeclared identifier, so the policy can access the data for this request.
@@ -573,6 +703,19 @@ func (m *PDP) TakeAuthnDecision(decision Decision, input StarTMFMap) (bool, erro
 	// Return the value as a Go boolean
 	return bool(result.(st.Bool).Truth()), nil
 
+}
+
+func (m *PDP) GetFile(filename string) (*conf.FileEntry, error) {
+
+	entry, err := m.fileCache.MustExist(filename)
+	if err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
+func (m *PDP) PutFile(filename string, content []byte) error {
+	return m.fileCache.Set(filename, content, 0)
 }
 
 func getInputElement(thread *st.Thread, _ *st.Builtin, args st.Tuple, kwargs []st.Tuple) (st.Value, error) {

@@ -21,10 +21,14 @@ require (
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/gofiber/template v1.8.3 // indirect
+	github.com/gofiber/utils v1.1.0 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-sqlite3 v1.14.28 // indirect
+	github.com/peterbourgon/ff/v4 v4.0.0-alpha.4 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/samber/slog-multi v1.4.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
@@ -34,6 +38,8 @@ require (
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
+	golang.org/x/sync v0.13.0 // indirect
+	mvdan.cc/gofumpt v0.8.0 // indirect
 )
 
 require (
@@ -41,6 +47,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0
 	github.com/goccy/go-yaml v1.17.1
+	github.com/gofiber/template/html/v2 v2.1.3
 	github.com/google/uuid v1.6.0
 	github.com/huandu/go-sqlbuilder v1.35.0
 	github.com/huandu/xstrings v1.5.0 // indirect

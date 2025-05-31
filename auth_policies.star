@@ -17,7 +17,7 @@ four objects that can be used to implement the authorization policies: 'request'
     "path": the url path (does not include the the query parameters).
     "query": a dictionary with all the query parameters in the url.
 
-    "tmf_entity": the TMForum entity being accessed (eg., productOffering, catalog, etc.).
+    "tmf_resource": the TMForum resource being accessed (eg., productOffering, catalog, etc.).
     "tmf_id": the identifier of the TMForum object being accessed.
 
     "headers": a dictionary with the headers in the HTTP request.
@@ -68,6 +68,8 @@ def authorize():
         print("user:", input.user.organizationIdentifier,"Is LEAR?", input.user.isLEAR)
     else:
         print("user is not authenticated")
+
+    return False
 
     # This rule denies access to remote users belonging to an organization in the list of forbidden countries
     if input.user.country in forbidden_countries:

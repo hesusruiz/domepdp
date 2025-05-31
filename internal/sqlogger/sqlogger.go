@@ -58,15 +58,21 @@ type groupOrAttrs struct {
 	attrs []slog.Attr // attrs if non-empty
 }
 
-type SQLogger struct {
-	opts         Options
-	goas         []groupOrAttrs
-	currentName  string
-	currentLogId int
-	db           *sql.DB
-	lastInsertId int64
-	stdHandler   slog.Handler
-	cwd          string
+type SQLogHandler struct {
+	mutex         *sync.Mutex
+	db            *sql.DB
+	opts          Options
+	goas          []groupOrAttrs
+	currentName   string
+	currentLogId  int
+	lastInsertId  int64
+	stdLogHandler slog.Handler
+	cwd           string
+}
+
+type SQLogHandlerInterface interface {
+	slog.Handler
+	Retrieve(numEntries int) ([]LogRecord, error)
 }
 
 type Options struct {
@@ -78,26 +84,30 @@ type Options struct {
 	NoColor bool
 }
 
-func NewSQLogger(opts *Options) (*SQLogger, error) {
+func NewSQLogHandler(opts *Options) (*SQLogHandler, error) {
 
-	h := &SQLogger{}
+	h := &SQLogHandler{}
 
 	if opts != nil {
 		h.opts = *opts
 	}
+
+	// Use Info level by default if not set
 	if h.opts.Level == nil {
 		h.opts.Level = slog.LevelInfo
 	}
 
+	// The log files are stored in the current working directory
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get the working directory: %w", err)
 	}
 	h.cwd = cwd
 
-	h.stdHandler = slog.Default().Handler()
+	h.stdLogHandler = slog.Default().Handler()
 
-	currentName, err := DetermineCurrentName()
+	// Look at the current directory and determine the current log file name
+	currentName, err := DetermineCurrentNameOnStartup()
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +124,7 @@ func NewSQLogger(opts *Options) (*SQLogger, error) {
 	}
 
 	h.db = db
+	h.mutex = &sync.Mutex{}
 
 	color.NoColor = h.opts.NoColor
 
@@ -121,7 +132,7 @@ func NewSQLogger(opts *Options) (*SQLogger, error) {
 
 }
 
-func DetermineCurrentName() (string, error) {
+func DetermineCurrentNameOnStartup() (string, error) {
 
 	// Read all entries in the current directory
 	dirEntry, err := os.ReadDir(".")
@@ -131,16 +142,16 @@ func DetermineCurrentName() (string, error) {
 
 	var candidateFileName string
 	candidateLogNumber := 0
-	minimumModificationTime := int64(0)
+	greatestModificationTime := int64(0)
 
-	for _, entry := range dirEntry {
+	for _, currentEntry := range dirEntry {
 		// Skip entries which are directories and handle only files
-		if entry.IsDir() {
+		if currentEntry.IsDir() {
 			continue
 		}
 
 		// Skip files with a name not according to the pattern name.aNumber.extension
-		parts := strings.Split(entry.Name(), ".")
+		parts := strings.Split(currentEntry.Name(), ".")
 		if len(parts) != 3 {
 			continue
 		}
@@ -150,13 +161,27 @@ func DetermineCurrentName() (string, error) {
 			continue
 		}
 
-		// We found a log file, check its modification time agains the current minimum
-		info, err := entry.Info()
+		// We found a log file, check its modification time against the current minimum
+		currentEntryInfo, err := currentEntry.Info()
 		if err != nil {
 			return "", err
 		}
 
-		if info.ModTime().Unix() < minimumModificationTime {
+		currentModificationTime := currentEntryInfo.ModTime().Unix()
+
+		if currentModificationTime < greatestModificationTime {
+			continue
+		}
+
+		currentEntryLogNumber, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return "", err
+		}
+
+		if currentModificationTime > greatestModificationTime {
+			greatestModificationTime = currentModificationTime
+			candidateFileName = currentEntry.Name()
+			candidateLogNumber = currentEntryLogNumber
 			continue
 		}
 
@@ -164,15 +189,10 @@ func DetermineCurrentName() (string, error) {
 		// We will choose the one with greater log number or when the current entry number is 0 and
 		// the candidate is numLogFiles-1
 
-		entryLogNumber, err := strconv.Atoi(parts[1])
-		if err != nil {
-			return "", err
-		}
-
-		if (entryLogNumber > candidateLogNumber) || (entryLogNumber == 0 && candidateLogNumber == numLogFiles-1) {
-			minimumModificationTime = info.ModTime().Unix()
-			candidateFileName = entry.Name()
-			candidateLogNumber = entryLogNumber
+		if (currentEntryLogNumber > candidateLogNumber) || (currentEntryLogNumber == 0 && candidateLogNumber == numLogFiles-1) {
+			greatestModificationTime = currentModificationTime
+			candidateFileName = currentEntry.Name()
+			candidateLogNumber = currentEntryLogNumber
 		}
 
 	}
@@ -185,7 +205,11 @@ func DetermineCurrentName() (string, error) {
 	}
 }
 
-func (h *SQLogger) Rotate() error {
+// rotate closes the current log database, increments the log ID, and opens a new log database.
+// If the log ID reaches the maximum number of log files, it wraps around to 0.
+// It also creates the necessary table in the new database.
+// It assumes that the database handle is already locked by the caller.
+func (h *SQLogHandler) rotate() error {
 	// Close the current log database
 	h.db.Close()
 
@@ -216,15 +240,15 @@ func (h *SQLogger) Rotate() error {
 	return nil
 }
 
-func (h *SQLogger) Name() string {
+func (h *SQLogHandler) Name() string {
 	return "SQLogger"
 }
 
-func (h *SQLogger) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *SQLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 
-func (h *SQLogger) Handle(c context.Context, r slog.Record) error {
+func (h *SQLogHandler) Handle(c context.Context, r slog.Record) error {
 
 	// Get a byte buffer from the pool and defer returning it to the pool
 	bufp := allocBuf()
@@ -371,7 +395,13 @@ func (h *SQLogger) Handle(c context.Context, r slog.Record) error {
 	// fmt.Println(string(bufColor))
 	os.Stdout.Write(bufColor)
 
-	// Insert the undecorated buffer into the log database
+	// *************************************************************
+	// We now insert a record in the database
+	// *************************************************************
+
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
 	stmt, err := h.db.Prepare("insert into entries (epoch_secs, nanos, level, content) values(?, ?, ?, ?)")
 	if err != nil {
 		return err
@@ -391,13 +421,78 @@ func (h *SQLogger) Handle(c context.Context, r slog.Record) error {
 	h.lastInsertId = id
 
 	if h.lastInsertId >= maxSizeLiveLog {
-		h.Rotate()
+		h.rotate()
 	}
 
 	return nil
 }
 
-func (h *SQLogger) withGroupOrAttrs(goa groupOrAttrs) *SQLogger {
+type LogRecord struct {
+	Seconds int64
+	Nanos   int32
+	Level   string
+	Content string
+}
+
+const queryLogSQL = `
+SELECT epoch_secs, nanos, level, content FROM entries ORDER BY rowid DESC, nanos DESC LIMIT ? OFFSET ?`
+
+const maxEntries = min(1000, maxSizeLiveLog)
+
+// Retrieve returns up to numEntries most recent LogRecord entries from the log handler.
+// If there are fewer than numEntries available, all available entries are returned.
+// Returns a slice of LogRecord and an error if retrieval fails.
+func (h *SQLogHandler) Retrieve(numEntries int) ([]LogRecord, error) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	if numEntries > maxEntries {
+		return nil, fmt.Errorf("number of entries requested (%d) exceeds maximum allowed (%d)", numEntries, maxEntries)
+	}
+
+	stmt, err := h.db.Prepare(queryLogSQL)
+	if err != nil {
+		return nil, fmt.Errorf("preparing log query: %w", err)
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.Query(numEntries, 0)
+	if err != nil {
+		return nil, fmt.Errorf("querying log records: %w", err)
+	}
+	defer rows.Close()
+
+	var logRecords []LogRecord
+
+	for rows.Next() {
+		var epochSecs int64
+		var nanos int32
+		var level int
+		var content []byte
+
+		err = rows.Scan(&epochSecs, &nanos, &level, &content)
+		if err != nil {
+			return nil, fmt.Errorf("scanning log record: %w", err)
+		}
+
+		levelString := slog.Level(level).String()
+
+		logRecords = append(logRecords, LogRecord{
+			Seconds: epochSecs,
+			Nanos:   nanos,
+			Level:   levelString,
+			Content: string(content),
+		})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating log records: %w", err)
+	}
+
+	return logRecords, nil
+
+}
+
+func (h *SQLogHandler) withGroupOrAttrs(goa groupOrAttrs) *SQLogHandler {
 	h2 := *h
 	h2.goas = make([]groupOrAttrs, len(h.goas)+1)
 	copy(h2.goas, h.goas)
@@ -405,26 +500,29 @@ func (h *SQLogger) withGroupOrAttrs(goa groupOrAttrs) *SQLogger {
 	return &h2
 }
 
-func (h *SQLogger) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h *SQLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h
 	}
 	return h.withGroupOrAttrs(groupOrAttrs{attrs: attrs})
 }
 
-func (h *SQLogger) WithGroup(name string) slog.Handler {
+func (h *SQLogHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
 	return h.withGroupOrAttrs(groupOrAttrs{group: name})
 }
 
-func (h *SQLogger) Close() {
+func (h *SQLogHandler) Close() {
+	if h.db == nil {
+		return
+	}
 	h.db.Close()
 	return
 }
 
-func (h *SQLogger) appendAttr(buf []byte, a slog.Attr, keyColor *color.Color) []byte {
+func (h *SQLogHandler) appendAttr(buf []byte, a slog.Attr, keyColor *color.Color) []byte {
 	// Resolve the Attr's value before doing anything else.
 	a.Value = a.Value.Resolve()
 	// Ignore empty Attrs.

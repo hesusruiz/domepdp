@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/goccy/go-json"
+	"github.com/hesusruiz/domeproxy/config"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -138,24 +139,9 @@ func DOME_JWKS() (jose.JSONWebKeySet, error) {
 	return jwks, nil
 }
 
-const DOME_LCL_WellKnown = "https://verifier.dome-marketplace-lcl.org/.well-known/openid-configuration"
-const DOME_DEV2_WellKnown = "https://verifier.dome-marketplace-dev2.org/.well-known/openid-configuration"
-const DOME_PRO_WellKnown = "https://verifier.dome-marketplace.eu/.well-known/openid-configuration"
+func NewOpenIDConfig(config *config.Config) (*OpenIDConfig, error) {
 
-func NewOpenIDConfig(environment Environment) (*OpenIDConfig, error) {
-
-	var verifierWellKnownURL string
-
-	switch environment {
-	case DOME_PRO:
-		verifierWellKnownURL = DOME_PRO_WellKnown
-	case DOME_DEV2:
-		verifierWellKnownURL = DOME_DEV2_WellKnown
-	case DOME_LCL:
-		verifierWellKnownURL = DOME_LCL_WellKnown
-	default:
-		return nil, fmt.Errorf("invalid environment: %v", environment)
-	}
+	verifierWellKnownURL := config.VerifierServer + "/.well-known/openid-configuration"
 
 	res, err := http.Get(verifierWellKnownURL)
 	if err != nil {

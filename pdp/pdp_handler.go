@@ -6,6 +6,7 @@ package pdp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,18 +23,19 @@ import (
 
 // HandleGETAuthorization returns an [http.Handler] which asks for an authorization decision from the PDP
 // by evaluation of the proper policy rules.
-// The parameter tmf should be an already instantiated [TMFdb] database manager.
+// The parameter tmf should be an already instantiated [TMFCache] database manager.
 // It also expects in ruleEngine an instance of a policy engine.
 func HandleGETAuthorization(
 	logger *slog.Logger,
-	tmf *TMFdb,
+	tmf *TMFCache,
 	ruleEngine *PDP,
 ) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		// Check authorization as if we are reading the object, but we are only interested in
 		// the authorization result, not in the object itself.
-		_, err := HandleREADAuth(logger, tmf, ruleEngine, r)
+		// TODO: process the request to get the object id, type and resource
+		_, err := HandleREADAuth(logger, tmf, ruleEngine, r, "catalog", "productOffering", "")
 		if err != nil {
 			// The user can not access the object
 			slog.Error("forbidden", slogor.Err(err), "URI", r.URL.RequestURI())
@@ -49,19 +51,20 @@ func HandleGETAuthorization(
 
 // HandleLISTAuth processes a GET request to retrieve a list of TMF objects
 func HandleLISTAuth(
-	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+	logger *slog.Logger, tmf *TMFCache, ruleEngine *PDP, r *http.Request, tmfAPI string, tmfResource string,
 ) ([]*TMFObject, error) {
 
 	// ***********************************************************************************
 	// 1. Parse the request and get the type of object we are processing.
 	// ***********************************************************************************
 
-	requestArgument, err := parseInputRequest(logger, r)
+	requestArgument, err := parseHTTPRequest(logger, r)
 	if err != nil {
 		slog.Error("HandleREADAuth: error in HTTP request", slogor.Err(err))
 		return nil, fmt.Errorf("HandleREADAuth: error in HTTP request: %W", err)
 	}
-	tmfType := requestArgument["tmf_entity"].(string)
+	requestArgument["tmf_api"] = tmfAPI
+	requestArgument["tmf_resource"] = tmfResource
 
 	// ******************************************************************************
 	// 2. Process the Access Token if it comes with the request
@@ -70,7 +73,7 @@ func HandleLISTAuth(
 	// LIST requests can be unauthenticated, but individual returned objects are
 	// subject to visibility policies
 	// tokstring will be the empty string if no access token is found
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, false)
+	tokString, tokenArgument, err := extractAccessToken(logger, ruleEngine, r, false)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err))
 		return nil, fmt.Errorf("processing the access token: %w", err)
@@ -80,13 +83,13 @@ func HandleLISTAuth(
 	// 3. Build the user object from the Access Token.
 	// ****************************************************************************
 
-	// The returned user object always exists.
+	// The returned user object always exists, even if empty.
 	// If the token was not provided or the user info does not exist, we get a default user object
 	// probably only useful for reading public information.
 	userArgument := parseUserInfo(tokString, tokenArgument)
 
 	// ***************************************************************************************
-	// 4. Retrieve the list of TMF objects locally.
+	// 4. Retrieve the list of TMF objects locally, we assume the object is fresh in the cache
 	// ***************************************************************************************
 
 	r.ParseForm()
@@ -98,6 +101,8 @@ func HandleLISTAuth(
 	limitStr := r.Form.Get("limit")
 	if limitStr != "" {
 		limit, _ = strconv.Atoi(limitStr)
+	} else {
+		limit = 10
 	}
 
 	// Loop until we have retrieved enough objects or there are not any more
@@ -108,8 +113,8 @@ func HandleLISTAuth(
 			break
 		}
 
-		// Retrieve the product offerings
-		candidateObjects, _, err := tmf.RetrieveLocalListTMFObject(nil, tmfType, r.Form)
+		// Retrieve the TMF objects of the given type
+		candidateObjects, _, err := tmf.LocalRetrieveListTMFObject(nil, tmfResource, r.Form)
 		if err != nil {
 			return nil, err
 		}
@@ -123,8 +128,8 @@ func HandleLISTAuth(
 		for _, tmfObject := range candidateObjects {
 
 			// Set the map representation
-			oMap := tmfObject.ContentMap
-			oMap["type"] = tmfObject.Type
+			oMap := tmfObject.ContentAsMap
+			oMap["type"] = tmfObject.ResourceName
 			oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
 
 			tmfObjectArgument := StarTMFMap(oMap)
@@ -134,22 +139,20 @@ func HandleLISTAuth(
 				userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.OrganizationIdentifier)
 			}
 
+			userArgument["isSeller"] = (userArgument["organizationIdentifier"] == tmfObject.Seller)
+			userArgument["isSellerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.SellerOperator)
+			userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.Seller) ||
+				(userArgument["organizationIdentifier"] == tmfObject.SellerOperator)
+
+			userArgument["isBuyer"] = (userArgument["organizationIdentifier"] == tmfObject.Buyer)
+			userArgument["isBuyerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.BuyerOperator)
+
 			// *********************************************************************************
 			// 5. Build the convenience data object from the usage terms embedded in the TMF object.
 			// *********************************************************************************
 
-			// We convert the complex structure into simple lists of countries and operator identifiers
-			permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
-			tmfObjectArgument["permittedCountries"] = permittedLegalRegions
-
-			prohibitedLegalRegions := getRestrictionElements(tmfObjectArgument, "prohibitedLegalRegion")
-			tmfObjectArgument["permittedCountries"] = prohibitedLegalRegions
-
-			permittedOperators := getRestrictionElements(tmfObjectArgument, "permittedOperator")
-			tmfObjectArgument["permittedCountries"] = permittedOperators
-
-			prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
-			tmfObjectArgument["permittedCountries"] = prohibitedOperators
+			// Update the TMF object with the restrictions on countries and operator identifiers
+			tmfObjectArgument = getAllRestrictionElements(tmfObjectArgument)
 
 			// *********************************************************************************
 			// 6. Pass the request, the object and the user to the rules engine for a decision.
@@ -175,20 +178,28 @@ func HandleLISTAuth(
 HandleREADAuth manages the read process of a single TMForum object (the GET method).
 */
 func HandleREADAuth(
-	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+	logger *slog.Logger,
+	tmfCache *TMFCache,
+	ruleEngine *PDP,
+	r *http.Request,
+	tmfAPI string,
+	tmfResource string,
+	id string,
 ) (*TMFObject, error) {
 
 	// ***********************************************************************************
 	// 1. Parse the request and get the 'id' of the object from the path of the request.
 	// ***********************************************************************************
 
-	requestArgument, err := parseInputRequest(logger, r)
+	requestArgument, err := parseHTTPRequest(logger, r)
 	if err != nil {
 		slog.Error("HandleREADAuth: error in HTTP request", slogor.Err(err))
 		return nil, fmt.Errorf("HandleREADAuth: error in HTTP request: %W", err)
 	}
-	tmfType := requestArgument["tmf_entity"].(string)
-	id := requestArgument["tmf_id"].(string)
+
+	requestArgument["tmf_api"] = tmfAPI
+	requestArgument["tmf_resource"] = tmfResource
+	requestArgument["tmf_id"] = id
 
 	// ******************************************************************************
 	// 2. Process the Access Token if it comes with the request
@@ -196,7 +207,7 @@ func HandleREADAuth(
 
 	// READ requests can be unauthenticated
 	// tokstring will be the empty string if no access token is found
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, false)
+	tokString, tokenArgument, err := extractAccessToken(logger, ruleEngine, r, false)
 	if err != nil {
 		slog.Error("HandleREADAuth", slogor.Err(err), "id", id)
 		return nil, fmt.Errorf("processing the access token: %w", err)
@@ -207,12 +218,11 @@ func HandleREADAuth(
 	//    This allows to apply the policies.
 	// ***************************************************************************************
 
+	slog.Debug("retrieving", "type", tmfResource, "id", id)
+
 	var tmfObject *TMFObject
-
-	slog.Debug("retrieving", "type", tmfType, "id", id)
-
 	var local bool
-	tmfObject, local, err = tmf.RetrieveOrUpdateObject(nil, id, "", "", LocalOrRemote)
+	tmfObject, local, err = tmfCache.RetrieveOrUpdateObject(nil, id, "", "", LocalOrRemote)
 	if err != nil {
 		slog.Error("HandleUPDATEAuth", slogor.Err(err), "id", id)
 		return nil, fmt.Errorf("not authorized: %w", err)
@@ -224,8 +234,8 @@ func HandleREADAuth(
 	}
 
 	// Create a summary map object for the rules engine, to make rules simple to write
-	oMap := tmfObject.ContentMap
-	oMap["type"] = tmfObject.Type
+	oMap := tmfObject.ContentAsMap
+	oMap["type"] = tmfObject.ResourceName
 	oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
 
 	tmfObjectArgument := StarTMFMap(oMap)
@@ -239,22 +249,20 @@ func HandleREADAuth(
 	// probably only useful for reading public information.
 	userArgument := parseUserInfo(tokString, tokenArgument)
 
+	userArgument["isSeller"] = (userArgument["organizationIdentifier"] == tmfObject.Seller)
+	userArgument["isSellerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.SellerOperator)
+	userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.Seller) ||
+		(userArgument["organizationIdentifier"] == tmfObject.SellerOperator)
+
+	userArgument["isBuyer"] = (userArgument["organizationIdentifier"] == tmfObject.Buyer)
+	userArgument["isBuyerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.BuyerOperator)
+
 	// *************************************************************************************
 	// 5. Build the convenience data object from the usage terms embedded in the TMF object.
 	// *************************************************************************************
 
-	// We convert the complex structure into simple lists of countries and operator identifiers
-	permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
-	tmfObjectArgument["permittedCountries"] = permittedLegalRegions
-
-	prohibitedLegalRegions := getRestrictionElements(tmfObjectArgument, "prohibitedLegalRegion")
-	tmfObjectArgument["permittedCountries"] = prohibitedLegalRegions
-
-	permittedOperators := getRestrictionElements(tmfObjectArgument, "permittedOperator")
-	tmfObjectArgument["permittedCountries"] = permittedOperators
-
-	prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
-	tmfObjectArgument["permittedCountries"] = prohibitedOperators
+	// Update the TMF object with the restrictions on countries and operator identifiers
+	tmfObjectArgument = getAllRestrictionElements(tmfObjectArgument)
 
 	// ********************************************************************************
 	// 6. Pass the request, the object and the user to the rules engine for a decision.
@@ -271,6 +279,23 @@ func HandleREADAuth(
 	} else {
 		return nil, fmt.Errorf("not authorized")
 	}
+}
+
+func getAllRestrictionElements(tmfObjectArgument StarTMFMap) StarTMFMap {
+
+	permittedLegalRegions := getRestrictionElements(tmfObjectArgument, "permittedLegalRegion")
+	tmfObjectArgument["permittedCountries"] = permittedLegalRegions
+
+	prohibitedLegalRegions := getRestrictionElements(tmfObjectArgument, "prohibitedLegalRegion")
+	tmfObjectArgument["permittedCountries"] = prohibitedLegalRegions
+
+	permittedOperators := getRestrictionElements(tmfObjectArgument, "permittedOperator")
+	tmfObjectArgument["permittedCountries"] = permittedOperators
+
+	prohibitedOperators := getRestrictionElements(tmfObjectArgument, "prohibitedOperator")
+	tmfObjectArgument["permittedCountries"] = prohibitedOperators
+
+	return tmfObjectArgument
 }
 
 func getRestrictionElements(object any, concept string) []string {
@@ -307,26 +332,28 @@ func getRestrictionElements(object any, concept string) []string {
 HandleUPDATEAuth manages the update process of a TMForum object (the http PATH verb).
 */
 func HandleUPDATEAuth(
-	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+	logger *slog.Logger, tmf *TMFCache, ruleEngine *PDP, r *http.Request,
+	tmfAPI string, tmfResource string, id string,
 ) (*TMFObject, error) {
 
 	// ********************************************************************
 	// 1. Parse the request and get the 'id' of the object to be updated from the path of the request.
 	// ********************************************************************
 
-	requestArgument, err := parseInputRequest(logger, r)
+	requestArgument, err := parseHTTPRequest(logger, r)
 	if err != nil {
 		return nil, err
 	}
-	tmfType := requestArgument["tmf_entity"].(string)
-	id := requestArgument["tmf_id"].(string)
+	requestArgument["tmf_api"] = tmfAPI
+	requestArgument["tmf_resource"] = tmfResource
+	requestArgument["tmf_id"] = id
 
 	// ******************************************************************************
 	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
 	// UPDATE requests must be authenticated
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
+	tokString, tokenArgument, err := extractAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
 		logger.Error("HandleUPDATEAuth: processing access token", slogor.Err(err))
 		return nil, fmt.Errorf("UPDATE: processing access token: %w", err)
@@ -338,10 +365,10 @@ func HandleUPDATEAuth(
 
 	var existingTmfObject *TMFObject
 
-	logger.Debug("retrieving", "type", tmfType, "id", id)
+	logger.Debug("retrieving", "type", tmfResource, "id", id)
 
 	// Check if the object is already in the local database
-	existingTmfObject, found, err := tmf.RetrieveLocalTMFObject(nil, id, "")
+	existingTmfObject, found, err := tmf.LocalRetrieveTMFObject(nil, id, "")
 	if err != nil {
 		return nil, fmt.Errorf("pdp: retrieving object from cache: %w", err)
 	}
@@ -386,7 +413,7 @@ func HandleUPDATEAuth(
 	// Set the user as the owner in the object being written
 	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
-	logger.Debug("updating", "type", tmfType)
+	logger.Debug("updating", "type", tmfResource)
 
 	// *********************************************************************************
 	// 6. Check if the user can perform the operation on the object.
@@ -420,7 +447,7 @@ func HandleUPDATEAuth(
 	// **********************************************************************************
 
 	// Update the object in the local database
-	err = tmf.UpsertTMFObject(nil, remotepo)
+	err = tmf.LocalUpsertTMFObject(nil, remotepo)
 	if err != nil {
 		logger.Error("pdp: update local cache", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
@@ -430,24 +457,26 @@ func HandleUPDATEAuth(
 }
 
 func HandleCREATEAuth(
-	logger *slog.Logger, tmf *TMFdb, ruleEngine *PDP, r *http.Request,
+	logger *slog.Logger, tmf *TMFCache, ruleEngine *PDP, r *http.Request,
+	tmfAPI string, tmfResource string,
 ) (*TMFObject, error) {
 
 	// ********************************************************************
 	// 1. Parse the HTTP request.
 	// ********************************************************************
 
-	requestArgument, err := parseInputRequest(logger, r)
+	requestArgument, err := parseHTTPRequest(logger, r)
 	if err != nil {
 		return nil, err
 	}
-	tmfType := requestArgument["tmf_entity"].(string)
+	requestArgument["tmf_api"] = tmfAPI
+	requestArgument["tmf_resource"] = tmfResource
 
 	// ******************************************************************************
 	// 2. Process the Access Token if it comes with the request
 	// ******************************************************************************
 
-	tokString, tokenArgument, err := processAccessToken(logger, ruleEngine, r, true)
+	tokString, tokenArgument, err := extractAccessToken(logger, ruleEngine, r, true)
 	if err != nil {
 		logger.Error("HandleUPDATEAuth", slogor.Err(err))
 		return nil, fmt.Errorf("access token missing or not valid")
@@ -502,7 +531,7 @@ func HandleCREATEAuth(
 	// Set the user as the owner in the object being written
 	incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
-	logger.Debug("creating", "type", tmfType)
+	logger.Debug("creating", "type", tmfResource)
 
 	// *********************************************************************************
 	// 6. Check if the user can perform the operation on the object.
@@ -542,7 +571,7 @@ func HandleCREATEAuth(
 	}
 
 	// Insert the object in the local database
-	err = tmf.UpsertTMFObject(nil, tmfObject)
+	err = tmf.LocalUpsertTMFObject(nil, tmfObject)
 	if err != nil {
 		logger.Error("pdp: update local cache", slogor.Err(err))
 		return nil, fmt.Errorf("not authorized: %w", err)
@@ -550,42 +579,6 @@ func HandleCREATEAuth(
 
 	return tmfObject, nil
 }
-
-// func doFastPOST(
-// 	logger *slog.Logger,
-// 	url string,
-// 	auth_token string,
-// 	organizationIdentifier string,
-// 	requestBody []byte,
-// ) (*TMFObject, error) {
-// 	const timeout = 10 * time.Second
-
-// 	// Get the request and response objects
-// 	req := fasthttp.AcquireRequest()
-// 	defer fasthttp.ReleaseRequest(req)
-// 	resp := fasthttp.AcquireResponse()
-// 	defer fasthttp.ReleaseResponse(resp)
-
-// 	req.SetBody(requestBody)
-
-// 	// This is a POST
-// 	req.Header.SetMethod("POST")
-
-// 	req.SetRequestURI(url)
-
-// 	// Set the headers for the outgoing request, including the authorization token
-// 	req.Header.Set("X-Organization", organizationIdentifier)
-// 	req.Header.Set("Authorization", "Bearer "+auth_token)
-// 	req.Header.Set("Accept", "application/json, text/plain, */*")
-// 	req.Header.SetContentType("application/json")
-
-// 	err := fasthttp.DoTimeout(req, resp, timeout)
-// 	if err != nil {
-// 		logger.Error("sending request", "object", url, slogor.Err(err))
-// 		return nil, fmt.Errorf("calling server: %w", err)
-// 	}
-
-// }
 
 func doTMFPOST(
 	logger *slog.Logger,
@@ -785,7 +778,7 @@ var httpMethodAliases = map[string]string{
 	"PATCH": "UPDATE",
 }
 
-// parseInputRequest converts the HTTP request into a StarTMFMap, processing the X-Original headers.
+// parseHTTPRequest converts the HTTP request into a StarTMFMap, processing the X-Original headers.
 //
 // To facilitate writing the rules, the StarTMFMap object will be composed of:
 // - Some relevant fields of the received http.Request
@@ -799,30 +792,25 @@ var httpMethodAliases = map[string]string{
 // - X-Original-Operation this an alias for the operatio being requested
 // - X-Original-Remote-Addr $remote_addr;
 // - X-Original-Host $host;
-func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) {
+func parseHTTPRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) {
 
 	// X-Original-URI is compulsory
 	request_uri := r.Header.Get("X-Original-URI")
 	if len(request_uri) == 0 {
-		logger.Error("X-Original-URI missing")
 		return nil, fmt.Errorf("X-Original-URI missing")
 	}
 
 	reqURL, err := url.ParseRequestURI(request_uri)
 	if err != nil {
-		logger.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
-		return nil, fmt.Errorf("X-Original-URI invalid: %w", err)
+		return nil, fmt.Errorf("X-Original-URI (%s) invalid: %w", request_uri, err)
 	}
 
 	// X-Original-Method is compulsory
 	original_method := r.Header.Get("X-Original-Method")
 	if len(original_method) == 0 {
-		logger.Error("X-Original-Method missing")
 		return nil, fmt.Errorf("X-Original-Method missing")
 	}
 	original_operation := r.Header.Get("X-Original-Operation")
-
-	logger.Info("Request authorization", "URI", request_uri)
 
 	// The Request elements will be represented to Starlark scripts as a StarTMFMap
 
@@ -850,23 +838,10 @@ func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error)
 	// We must have 2 or more components
 	if len(request_uri_parts) < 2 {
 		logger.Error("X-Original-URI invalid", slogor.Err(err), "URI", request_uri)
-		return nil, fmt.Errorf("X-Original-URI invalid")
+		return nil, fmt.Errorf("X-Original-URI invalid: %s", request_uri)
 	}
 
 	requestArgument["path"] = request_uri_parts
-
-	// This is a request for a list of objects. Set the alias accordingly
-	if len(request_uri_parts) == 2 {
-		requestArgument["action"] = "LIST"
-	}
-
-	// In DOME, the type of object is the second path component
-	requestArgument["tmf_entity"] = request_uri_parts[1]
-
-	// In DOME, the identifier of the object is the last path component
-	if len(request_uri_parts) >= 3 {
-		requestArgument["tmf_id"] = request_uri_parts[len(request_uri_parts)-1]
-	}
 
 	// The query, as a list of properties
 	queryValues, err := parseQuery(reqURL.RawQuery)
@@ -879,12 +854,12 @@ func parseInputRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error)
 
 }
 
-// processAccessToken retrieves the Access Token from the request and optionally verifies it and
+// extractAccessToken retrieves the Access Token from the request and optionally verifies it and
 // creates a StarTMFMap ready to be passed to the rules engine.
 //
 // The access token may not exist, but if verification is requested, then it must exist and must be valid.
 // If verification is not requested, a nil tokenArgument is returned without an error.
-func processAccessToken(
+func extractAccessToken(
 	logger *slog.Logger,
 	ruleEngine *PDP,
 	r *http.Request,
@@ -898,14 +873,14 @@ func processAccessToken(
 		if verify {
 			logger.Error("access token missing")
 			return "", nil, fmt.Errorf("access token missing")
+		} else {
+			// If we do not have to verify, an empty token is not considered an error
+			return tokString, StarTMFMap{}, nil
 		}
-	} else {
-		// If we do not have to verify, an empty token is not considered an error
-		return tokString, StarTMFMap{}, nil
 	}
 
 	// Just some logs
-	logger.Debug("Access Token found")
+	slog.Debug("Access Token found", "token", tokString)
 
 	// Verify the token and extract the claims.
 	// A verification error stops processing.
@@ -998,21 +973,28 @@ func takeDecision(
 		"user":    userArgument,
 	}
 
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		b, err := json.MarshalIndent(input, "", "  ")
+		if err == nil {
+			fmt.Println("PDP input:", string(b))
+		}
+	}
+
 	decision, err := ruleEngine.TakeAuthnDecision(Authorize, input)
 
 	// An error is considered a rejection, continue with the next candidate object
 	if err != nil {
-		slog.Error("!!!!!! REJECTED due to an error", slogor.Err(err))
+		slog.Error("PDP: request rejected due to an error", slogor.Err(err))
 		return false
 	}
 
 	// The rules engine rejected the request, continue with the next candidate object
 	if !decision {
-		slog.Warn("!!!!!! REJECTED due to policy")
+		slog.Warn("PDP: request rejected due to policy")
 		return false
 	}
 
 	// The rules engine accepted the request, add the object to the final list
-	slog.Info("PDP Authorized the request")
+	slog.Info("PDP: request authorised")
 	return true
 }
