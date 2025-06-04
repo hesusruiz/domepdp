@@ -11,7 +11,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -68,7 +68,7 @@ func main() {
 
 	tmfConfig := config.DefaultConfig(server, false, true)
 
-	tmf, err := pdp.NewTMFCache(tmfConfig)
+	tmf, err := tmfcache.NewTMFCache(tmfConfig)
 	if err != nil {
 		log.Fatal(err)
 	}

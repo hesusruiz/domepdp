@@ -558,3 +558,10 @@ var StandardPrefixToBAEPrefix = map[string]string{
 	"/tmf-api/serviceCatalogManagement/v4":    "services",
 	"/tmf-api/resourceInventoryManagement/v4": "resourceInventory",
 }
+
+// The names of some special objects in the DOME ecosystem
+const ProductOffering = "productOffering"
+const ProductSpecification = "productSpecification"
+const ProductOfferingPrice = "productOfferingPrice"
+const ServiceSpecification = "serviceSpecification"
+const ResourceSpecification = "resourceSpecification"

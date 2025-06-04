@@ -6,8 +6,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -20,7 +20,7 @@ import (
 	"github.com/hesusruiz/domeproxy/config"
 	"github.com/hesusruiz/domeproxy/internal/run"
 	"github.com/hesusruiz/domeproxy/mitm"
-	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 
@@ -29,119 +29,30 @@ import (
 
 func main() {
 
-	processArgs()
+	startServices(os.Args[1:])
 
-	// PDP and general command line flags
-	pdpAddress := flag.String("pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
-	debug := flag.Bool("debug", false, "run in debug mode with more logs enabled")
-	nocolor := flag.Bool("nocolor", false, "disable color output for the logs to stdout")
-	internal := flag.Bool("internal", false, "true if must use internal upstream hosts")
-	usingBAEProxy := flag.Bool("bae", true, "use the BAE Proxy for external access to TMForum")
-	domeenvir := flag.String("env", "sbx", "environment, one of lcl, sbx, dev2 or pro.")
-
-	// Man-In-The-Middle proxy flags
-	enableMITM := flag.Bool("enablemitm", false, "enable the Man-In-The-Middle proxy server")
-	mitmAddress := flag.String("mitm", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
-	caCertFile := flag.String("cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
-	caKeyFile := flag.String("cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
-	proxyPassword := flag.String("password", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
-
-	flag.Parse()
-
-	// concurrentGroup collects actors (functions) and runs them concurrently. When one actor (function) returns,
-	// all actors are interrupted by calling to their stop function for a graceful shutdown.
-	var concurrentGroup run.Group
-
-	tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
-	if err != nil {
-		panic(err)
-	}
-
-	// Make sure to close the database associated to the log
-	defer tmfConfig.LogHandler.Close()
-
-	// Configure the PDP server to receive/authorize intercepted requests
-	tmfRun, tmfStop, err := tmfproxy.TMFServerHandler(tmfConfig)
-	if err != nil {
-		panic(err)
-	}
-
-	// Add to the monitoring group
-	concurrentGroup.Add(tmfRun, tmfStop)
-
-	if *enableMITM {
-
-		// Start a MITM server to intercept the requests to the TMF APIs
-		mitmConfig := mitm.NewConfig(
-			*domeenvir,
-			*mitmAddress,
-			*caCertFile,
-			*caKeyFile,
-			*proxyPassword,
-			*pdpAddress,
-		)
-
-		mitmRun, mitmStop, err := mitm.MITMServerHandler(mitmConfig)
-		if err != nil {
-			panic(err)
-		}
-		concurrentGroup.Add(mitmRun, mitmStop)
-
-	}
-
-	startDebugServer(tmfConfig.LogLevel)
-
-	// The management of the interrupt signal (ctrl-c)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	concurrentGroup.Add(func() error {
-		<-ctx.Done()
-		return fmt.Errorf("interrupt signal has been received")
-	}, func(error) {
-		stop()
-	})
-
-	// Start all actors and wait for interrupt signal to gracefully shut down the server.
-	err = concurrentGroup.Run()
-	if err != nil {
-		slog.Error("error running concurrent group", "err", err)
-	}
-	slog.Info("shutting down gracefully")
 }
 
-// startDebugServer allows remote setting of the log level
-func startDebugServer(logLevel *slog.LevelVar) {
-	// Start a debug server on a random port, enabling control of log level.
-	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
-		logLevel.Set(slog.LevelDebug)
-		w.WriteHeader(http.StatusOK)
-	})
-	http.HandleFunc("/debug/logsoff", func(w http.ResponseWriter, r *http.Request) {
-		logLevel.Set(slog.LevelInfo)
-		w.WriteHeader(http.StatusOK)
-	})
-	go func() {
-		ln, err := net.Listen("tcp", "localhost:")
-		if err != nil {
-			slog.Error("failed to start debug server", "err", err)
-		} else {
-			slog.Info("debug server listening", "addr", ln.Addr())
-			err := http.Serve(ln, nil)
-			slog.Error("debug server exited", "err", err)
-		}
-	}()
-}
-
-func processArgs() {
+func startServices(args []string) {
 
 	rootFlags := ff.NewFlagSet("globalflags")
+
 	verbose := rootFlags.Bool('v', "verbose", "increase log verbosity")
 
+	// PDP and general command line flags
 	pdpAddress := rootFlags.String('p', "pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
 	debug := rootFlags.Bool('d', "debug", "run in debug mode with more logs enabled")
 	nocolor := rootFlags.Bool('n', "nocolor", "disable color output for the logs to stdout")
 	internal := rootFlags.Bool('i', "internal", "true if must use internal upstream hosts")
-	usingBAEProxy := rootFlags.BoolDefault('b', "bae", true, "use the BAE Proxy for external access to TMForum")
+	usingBAEProxy := rootFlags.BoolDefault('b', "bae", false, "use the BAE Proxy for external access to TMForum")
 	domeenvir := rootFlags.StringEnum('e', "env", "runtime environment [lcl, sbx, dev2 or pro]", "sbx", "lcl", "dev2", "pro")
+
+	// Man-In-The-Middle proxy flags
+	enableMITM := rootFlags.BoolLong("mitmenable", "enable the Man-In-The-Middle proxy server")
+	mitmAddress := rootFlags.StringLong("mitmaddress", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
+	caCertFile := rootFlags.StringLong("mitmcacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
+	caKeyFile := rootFlags.StringLong("mitmcakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
+	proxyPassword := rootFlags.StringLong("mitmpassword", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
 
 	rootCmd := &ff.Command{
 		Name:  "domepdp",
@@ -149,13 +60,12 @@ func processArgs() {
 		Flags: rootFlags,
 		Exec: func(ctx context.Context, args []string) error {
 
-			config.SetLogger(*debug, *nocolor)
-
 			fmt.Println("running MAIN domepdp command")
 			if len(args) > 0 {
-				fmt.Println("invalid subcommand:", args[0])
-				os.Exit(-1)
+				return fmt.Errorf("invalid subcommand: '%s'", args[0])
 			}
+
+			config.SetLogger(*debug, *nocolor)
 
 			// concurrentGroup collects actors (functions) and runs them concurrently. When one actor (function) returns,
 			// all actors are interrupted by calling to their stop function for a graceful shutdown.
@@ -182,12 +92,33 @@ func processArgs() {
 
 			// The management of the interrupt signal (ctrl-c)
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+
 			concurrentGroup.Add(func() error {
 				<-ctx.Done()
 				return fmt.Errorf("interrupt signal has been received")
 			}, func(error) {
 				stop()
 			})
+
+			if *enableMITM {
+
+				// Start a MITM server to intercept the requests to the TMF APIs
+				mitmConfig := mitm.NewConfig(
+					*domeenvir,
+					*mitmAddress,
+					*caCertFile,
+					*caKeyFile,
+					*proxyPassword,
+					*pdpAddress,
+				)
+
+				mitmRun, mitmStop, err := mitm.MITMServerHandler(mitmConfig)
+				if err != nil {
+					panic(err)
+				}
+				concurrentGroup.Add(mitmRun, mitmStop)
+
+			}
 
 			// Start all actors and wait for interrupt signal to gracefully shut down the server.
 			err = concurrentGroup.Run()
@@ -206,7 +137,7 @@ func processArgs() {
 	var delete = syncFlags.BoolLong("delete", "delete the database before performing a new synchronization")
 	var resources = syncFlags.StringList('r', "resources", "TMForum resource type to synchronize. Can be repeated to specify more than one")
 
-	repeatCmd := &ff.Command{
+	syncCmd := &ff.Command{
 		Name:      "sync",
 		Usage:     "domepdp [GLOBALFLAGS] sync [-f DURATION] [--delete] [-r RESOURCE1 [-r RESOURCE2]]",
 		ShortHelp: "perform a one-time syncronization of the TMForum objects into the local database",
@@ -234,10 +165,10 @@ func processArgs() {
 			// Make sure to close the database associated to the log
 			defer tmfConfig.LogHandler.Close()
 
-			tmf, err := pdp.NewTMFCache(tmfConfig)
+			tmf, err := tmfcache.NewTMFCache(tmfConfig)
 			if err != nil {
 				log.Fatal(err)
-				fmt.Println("error calling NewTMFdb", err.Error())
+				fmt.Println("error calling NewTMFCache", err.Error())
 				os.Exit(-1)
 			}
 			defer tmf.Close()
@@ -255,46 +186,90 @@ func processArgs() {
 			// Write some stats
 			fmt.Println("############################################")
 
-			var differentTypes = make(map[string]bool)
+			var differentTypes = make(map[string]int)
 
 			fmt.Println("Visited objects:")
 			for id := range visitedObjects {
 				parts := strings.Split(id, ":")
-				differentTypes[parts[2]] = true
+				count := differentTypes[parts[2]]
+				count++
+				differentTypes[parts[2]] = count
 				fmt.Println(id)
 			}
 			fmt.Println("############################################")
 
+			fmt.Println("Total objects:", len(visitedObjects))
 			fmt.Println("Different types:")
-			for t := range differentTypes {
-				fmt.Println(t)
+			for t, count := range differentTypes {
+				fmt.Println(t, count)
 			}
 
 			return nil
 		},
 	}
-	rootCmd.Subcommands = append(rootCmd.Subcommands, repeatCmd)
+	rootCmd.Subcommands = append(rootCmd.Subcommands, syncCmd)
 
 	countCmd := &ff.Command{
-		Name:      "count",
-		Usage:     "textctl count [<ARG> ...]",
-		ShortHelp: "count the number of bytes in the arguments",
-		Flags:     ff.NewFlagSet("count").SetParent(rootFlags), // count has no flags itself, but it should still be able to parse root flags
+		Name:      "get",
+		Usage:     "domepdp get TMF_ID",
+		ShortHelp: "retrieve a single object by its ID",
+		Flags:     ff.NewFlagSet("get").SetParent(rootFlags),
 		Exec: func(ctx context.Context, args []string) error {
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "count: nargs=%d\n", len(args))
+				fmt.Fprintf(os.Stderr, "get: nargs=%d\n", len(args))
 			}
-			var count int
+
+			logger := config.SetLogger(*debug, *nocolor)
+			defer logger.Close()
+
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
+			if err != nil {
+				panic(err)
+			}
+
+			// Make sure to close the database associated to the log
+			defer tmfConfig.LogHandler.Close()
+
+			tmf, err := tmfcache.NewTMFCache(tmfConfig)
+			if err != nil {
+				log.Fatal(err)
+				fmt.Println("error calling NewTMFCache", err.Error())
+				os.Exit(-1)
+			}
+			defer tmf.Close()
+
+			if *fressness > 0 {
+				tmf.Maxfreshness = *fressness
+			}
+
 			for _, arg := range args {
-				count += len(arg)
+				if len(arg) == 0 {
+					continue
+				}
+
+				po, found, err := tmf.LocalRetrieveTMFObject(nil, arg, "")
+				if err != nil {
+					panic(err)
+				}
+				if !found {
+					fmt.Println("object not found:", arg)
+					continue
+				}
+				out, err := json.MarshalIndent(po.ContentAsMap, "", "   ")
+				if err != nil {
+					panic(err)
+				}
+				fmt.Println("Object", arg)
+				fmt.Println(string(out))
+
 			}
-			fmt.Fprintf(os.Stdout, "%d\n", count)
 			return nil
 		},
 	}
-	rootCmd.Subcommands = append(rootCmd.Subcommands, countCmd) // add the count command underneath the root command
+	rootCmd.Subcommands = append(rootCmd.Subcommands, countCmd)
 
-	if err := rootCmd.ParseAndRun(context.Background(), os.Args[1:]); err != nil {
+	// Parse the arguments and flags and select the proper command to execute
+	if err := rootCmd.Parse(args, ff.WithEnvVarPrefix("PDP")); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", ffhelp.Command(rootCmd))
 
 		if errors.Is(err, ff.ErrHelp) {
@@ -302,10 +277,47 @@ func processArgs() {
 			os.Exit(0)
 		} else {
 			fmt.Fprintf(os.Stderr, "error: %s\n", err)
-			os.Exit(-1)
+			os.Exit(1)
+		}
+
+	}
+
+	// At this moment, the flags have the values either from the environment or from the command line
+	if err := rootCmd.Run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", ffhelp.Command(rootCmd))
+
+		if errors.Is(err, ff.ErrHelp) {
+			fmt.Println("HELP is requested")
+			os.Exit(0)
+		} else {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err)
+			os.Exit(1)
 		}
 
 	}
 
 	os.Exit(0)
+}
+
+// startDebugServer allows remote setting of the log level
+func startDebugServer(logLevel *slog.LevelVar) {
+	// Start a debug server on a random port, enabling control of log level.
+	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelDebug)
+		w.WriteHeader(http.StatusOK)
+	})
+	http.HandleFunc("/debug/logsoff", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelInfo)
+		w.WriteHeader(http.StatusOK)
+	})
+	go func() {
+		ln, err := net.Listen("tcp", "localhost:")
+		if err != nil {
+			slog.Error("failed to start debug server", "err", err)
+		} else {
+			slog.Info("debug server listening", "addr", ln.Addr())
+			err := http.Serve(ln, nil)
+			slog.Error("debug server exited", "err", err)
+		}
+	}()
 }

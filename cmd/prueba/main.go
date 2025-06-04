@@ -1,27 +1,32 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"strings"
+	"log"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/hesusruiz/domeproxy/tmfcache"
+	"gitlab.com/greyxor/slogor"
 )
 
 func main() {
-	// Estimate the final size needed (e.g., 100 bytes)
-	estimatedSize := 1024
 
-	var sb strings.Builder
-	fmt.Printf("Initial Capacity: %d, Length: %d\n", sb.Cap(), sb.Len())
+	slog.SetDefault(slog.New(slogor.NewHandler(os.Stderr, slogor.SetLevel(slog.LevelInfo), slogor.SetTimeFormat(time.TimeOnly), slogor.ShowSource())))
+	flag.Parse()
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Pre-allocate the buffer using Grow()
-	sb.Grow(estimatedSize)
+	var o *tmfcache.TMFObject
 
-	fmt.Printf("After Grow capacity: %d, Length: %d\n", sb.Cap(), sb.Len())
+	err := o.FromMap(
+		map[string]any{
+			"ID": "urn:ngsi-ld:ProductOffering",
+		},
+	)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 
-	// Now write data to the builder
-	sb.WriteString("This is the first part. ")
-	sb.WriteString("And this is the second part.")
-	// ... potentially many more writes
-
-	fmt.Printf("Final Capacity: %d, Length: %d\n", sb.Cap(), sb.Len())
-	fmt.Println("Result:", sb.String())
 }

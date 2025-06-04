@@ -2,7 +2,7 @@
 // Use of this source code is governed by an Apache 2.0
 // license that can be found in the LICENSE file.
 
-package pdp
+package tmfcache
 
 import (
 	"context"
@@ -47,7 +47,7 @@ type TMFCache struct {
 	RefreshCounter int
 	Dump           bool
 	cloneMutex     sync.Mutex
-	httpClient     *http.Client
+	HttpClient     *http.Client
 }
 
 var ErrorRedirectsNotAllowed = errors.New("redirects not allowed")
@@ -78,7 +78,7 @@ func NewTMFCache(config *config.Config) (*TMFCache, error) {
 
 	// Create the http client to send requests to the remore TMF server
 	// This instance is safe for concurrent use and will be reused for performance
-	tmf.httpClient = &http.Client{
+	tmf.HttpClient = &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return ErrorRedirectsNotAllowed
@@ -90,23 +90,6 @@ func NewTMFCache(config *config.Config) (*TMFCache, error) {
 
 func (tmf *TMFCache) Server() string {
 	return tmf.domeServer
-}
-
-func (tmf *TMFCache) RequestDB(dbconn *sqlite.Conn) (*sqlite.Conn, error) {
-	if dbconn != nil {
-		return dbconn, nil
-	}
-
-	var err error
-	dbconn, err = tmf.dbpool.Take(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	return dbconn, nil
-}
-
-func (tmf *TMFCache) ReleaseDB(dbconn *sqlite.Conn) {
-	tmf.dbpool.Put(dbconn)
 }
 
 func (tmf *TMFCache) Close() {
@@ -233,12 +216,13 @@ func (tmf *TMFCache) CloneOneProductOffering(oMap map[string]any, indent int, vi
 	defer tmf.dbpool.Put(dbconn)
 
 	// Wrap all db operations in a SQLite Savepoint (which is a nestable transaction)
+	// TODO: is this necessary? We only need transactions for the individual objects
 	release := sqlitex.Save(dbconn)
 	defer release(&err)
 
 	// Create the ProductOffering object with whatever info we have now. We will then retrieve the owner info,
 	// update it and save it in the local database.
-	po, err := NewTMFObject(oMap, nil)
+	po, err := TMFObjectFromMap(oMap)
 	if err != nil {
 		return nil, fmt.Errorf("CloneOneProductOffering: %w", err)
 	}
@@ -276,141 +260,9 @@ func (tmf *TMFCache) CloneOneProductOffering(oMap map[string]any, indent int, vi
 
 }
 
-func (tmf *TMFCache) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error) {
+func (tmf *TMFCache) CloneAllRemoteResources() ([]*TMFObject, map[string]bool, error) {
 	tmf.cloneMutex.Lock()
 	defer tmf.cloneMutex.Unlock()
-
-	visitedObjects := make(map[string]bool)
-
-	// We will retrieve the objects in chunks of 100, looping until we get a reply with no objects
-	limit := 10
-	offset := 0
-
-	// We are only interested in ProductOfferings which are launched or active
-	// to the market (lifecycleStatus=Launched,Active)
-	lifecycleStatus := "Launched,Active"
-
-	var poList []*TMFObject
-
-	for {
-
-		// Get the list of catalogues from the DOME server
-		url := fmt.Sprintf("%s/catalog/catalog?limit=%d&offset=%d&lifecycleStatus=%s", tmf.domeServer, limit, offset, lifecycleStatus)
-		res, err := http.Get(url)
-		if err != nil {
-			slog.Error(err.Error())
-			return nil, nil, err
-		}
-		body, err := io.ReadAll(res.Body)
-		res.Body.Close()
-		if res.StatusCode > 299 {
-			slog.Error("Response failed", "status", res.StatusCode, "body", body)
-			return nil, nil, err
-		}
-		if err != nil {
-			slog.Error("reading response body", slogor.Err(err))
-			return nil, nil, err
-		}
-
-		// Parse the JSON response
-		var poListMap []map[string]any
-		err = json.Unmarshal(body, &poListMap)
-		if err != nil {
-			slog.Error("parsing JSOn response", slogor.Err(err))
-			return nil, nil, err
-		}
-
-		// Check if we should termninate the loop because there are no more objects
-		if len(poListMap) == 0 {
-			break
-		}
-
-		// Process the list
-		for _, oMap := range poListMap {
-
-			po, err := NewTMFObject(oMap, nil)
-			if err != nil {
-				slog.Error("creating NewTMFObject", slogor.Err(err))
-				continue
-			}
-
-			// There must be a relatedParty object
-			relatedPartyList, ok := po.ContentAsMap["relatedParty"].([]any)
-			if !ok {
-				slog.Error("invalid relatedParty object")
-				out, _ := json.MarshalIndent(oMap, "", "   ")
-				fmt.Println(string(out))
-				continue
-			}
-
-			if relatedPartyList == nil {
-				slog.Error("relatedParty is nil")
-				return nil, nil, fmt.Errorf("relatedParty is nil")
-			}
-
-			// One of the relatedParty items must be the one defining the owner
-			for _, rp := range relatedPartyList {
-				rpMap := rp.(map[string]any)
-				if strings.ToLower(rpMap["role"].(string)) == "owner" {
-					owner, _, err := tmf.RetrieveOrUpdateObject(nil, rpMap["href"].(string), "", "", LocalOrRemote)
-					if err != nil {
-						slog.Error(err.Error())
-						return nil, nil, err
-					}
-
-					// The array 'externalReference' contains the ID of the organization
-					ownerReference := owner.ContentAsMap["externalReference"].([]any)
-					if ownerReference == nil {
-						slog.Info("externalReference is nil")
-						return nil, nil, fmt.Errorf("externalReference is nil")
-					}
-
-					for _, extRef := range ownerReference {
-						extRefMap := extRef.(map[string]any)
-						if extRefMap["externalReferenceType"] == "idm_id" {
-							oid := extRefMap["name"].(string)
-							organization := owner.ID
-
-							// Now that we have the owner, update the local database for the productSpecification object
-							if len(owner.OrganizationIdentifier) == 0 {
-								owner, _ = owner.SetOwner(oid, organization)
-								err := tmf.LocalUpsertTMFObject(nil, owner)
-								if err != nil {
-									slog.Error(err.Error())
-									return nil, nil, err
-								}
-							}
-							if len(po.OrganizationIdentifier) == 0 {
-								po, _ = po.SetOwner(oid, organization)
-								err := tmf.LocalUpsertTMFObject(nil, po)
-								if err != nil {
-									slog.Error(err.Error())
-									return nil, nil, err
-								}
-							}
-
-							poList = append(poList, po)
-							break
-						}
-					}
-
-				}
-			}
-
-			visitedObjects[po.ID] = true
-
-		}
-
-		// Go and retrieve the next chunk of objects
-		offset = offset + limit
-
-	}
-
-	return poList, visitedObjects, nil
-
-}
-
-func (tmf *TMFCache) CloneAllRemoteResources() ([]*TMFObject, map[string]bool, error) {
 
 	visitedObjects := make(map[string]bool)
 
@@ -430,6 +282,8 @@ func (tmf *TMFCache) CloneAllRemoteResources() ([]*TMFObject, map[string]bool, e
 }
 
 func (tmf *TMFCache) CloneAllRemoteBAEResources() ([]*TMFObject, map[string]bool, error) {
+	tmf.cloneMutex.Lock()
+	defer tmf.cloneMutex.Unlock()
 
 	visitedObjects := make(map[string]bool)
 
@@ -478,7 +332,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 
 		url := hostAndPath + query
 
-		// Get the list of product offerings from the DOME server
+		// Get the object from the DOME server
 		slog.Debug("retrieving objects", "url", url)
 		res, err := http.Get(url)
 		if err != nil {
@@ -533,7 +387,8 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 
 			var local bool
 
-			// With RetrieveOrUpdateObject, we go to the remote server only if the object is not in the local cache and is not fresh enough
+			// With RetrieveOrUpdateObject, we go to the remote server only if the object is not in the local cache and
+			// is not fresh enough
 			tmfObject, local, err := tmf.RetrieveOrUpdateObject(nil, id, "", "", LocalOrRemote)
 			if err != nil {
 				slog.Error("RetrieveOrUpdateObject", slogor.Err(err), "id", id)
@@ -550,6 +405,9 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 			}
 
 			// TODO: there must be a related party with the Seller, Buyer, SellerOperator and BuyerOperator roles
+			// If there is, then just continue.
+			// Otherwise, if the object is a ProductOffering, try to deduce the owner, by using the info in
+			// the associated ProductSpecification object.
 
 			// // There must be a relatedParty object
 			// relatedPartyList, ok := po.ContentMap["relatedParty"].([]any)
@@ -729,6 +587,177 @@ func (tmf *TMFCache) DeduceProductOfferingOwner(dbconn *sqlite.Conn, productOffe
 		organizationObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, "", "", LocalOrRemote)
 		if err != nil {
 			slog.Error("DeduceProductOfferingOwner: retrieving organization object", "href", href, "productSpecification", productSpecification.ID, slogor.Err(err))
+			// We do not stop the loop. We may have other relatedParty objects
+			// with the owner information we need.
+			continue
+		}
+
+		// Inside Organization, the array externalReference contains the ID of the organization
+		ownerReference, ok := organizationObject.ContentAsMap["externalReference"].([]any)
+		if !ok {
+			slog.Error("DeduceProductOfferingOwner: externalReference is nil or not a list", "productSpecification", productSpecification.ID)
+			continue
+		}
+
+		// The externalReference array must contain an entry with a map named "externalReferenceType"
+		// where one of the keys is "idm_id".
+		// We look at all entries in the array to find the one with "externalReferenceType" = "idm_id"
+		for _, extRef := range ownerReference {
+			extRefMap, ok := extRef.(map[string]any)
+			if !ok {
+				continue
+			}
+			externalReferenceType, ok := extRefMap["externalReferenceType"].(string)
+			if !ok {
+				continue
+			}
+
+			if strings.ToLower(externalReferenceType) == "idm_id" {
+
+				oid, ok := extRefMap["name"].(string)
+				if !ok {
+					slog.Error("DeduceProductOfferingOwner: externalReference 'name' is nil or not a string", "productSpecification", productSpecification.ID)
+					continue
+				}
+				organization := organizationObject.ID
+
+				// Now that we have the owner, update the local database for the Organization object
+				if len(organizationObject.OrganizationIdentifier) == 0 || len(organizationObject.Organization) == 0 {
+					organizationObject, _ = organizationObject.SetOwner(oid, organization)
+					err := tmf.LocalUpsertTMFObject(dbconn, organizationObject)
+					if err != nil {
+						return "", "", fmt.Errorf("DeduceProductOfferingOwner: %w", err)
+					}
+				}
+
+				// And do the same with the ProductSpecification object
+				if len(productSpecification.OrganizationIdentifier) == 0 || len(productSpecification.Organization) == 0 {
+					productSpecification, _ = productSpecification.SetOwner(oid, organization)
+					err := tmf.LocalUpsertTMFObject(dbconn, productSpecification)
+					if err != nil {
+						return "", "", fmt.Errorf("DeduceProductOfferingOwner: %w", err)
+					}
+				}
+
+				return oid, organization, nil
+			}
+		}
+
+	}
+
+	return "", "", fmt.Errorf("relatedParty is nil")
+}
+
+// DeduceProductOfferingSeller retrieves the owner of a product offering for old entries not complying with the DOME rules.
+//
+// The strategy is the following:
+//  1. If the productOffering already includes information about the owner, we process it and save in the local database.
+//  2. Otherwise, we retrieve the remote productSpecification object associated to the productOffering,
+//     which always includes the owner information in its relatedParty sub-resource.
+//
+// The productOffering object has a 'productSpecification' field that points to the remote
+// productSpecification object.
+// The productSpecificationObject has a 'relatedParty' field which is an array of objects,
+// one of which must have the role 'owner', with a 'href' field pointing to the remote 'organization' TMF object
+// which is (finally) the one with the owner object.
+func (tmf *TMFCache) DeduceProductOfferingSeller(
+	dbconn *sqlite.Conn,
+	po *TMFObject,
+) (organizationIdentifier string, organization string, err error) {
+	if dbconn == nil {
+		var err error
+		dbconn, err = tmf.dbpool.Take(context.Background())
+		if err != nil {
+			return "", "", err
+		}
+		defer func() {
+			tmf.dbpool.Put(dbconn)
+		}()
+	}
+
+	// Sanity check: this logic only applies to a ProductOffering
+	if po.ResourceName != config.ProductOffering {
+		return "", "", fmt.Errorf("DeduceProductOfferingSeller: not a ProductOffering: %s", po.ResourceName)
+	}
+
+	// If we have locally already the owner information, we return it. Once an object is created in the DOME
+	// server, the owner never changes, so we can trust the local information.
+	if po.Seller != "" {
+		// Sanity check
+		if !strings.HasPrefix(po.Seller, "did:elsi") {
+			return "", "", fmt.Errorf("DeduceProductOfferingSeller: invalid Seller value: %s", po.Seller)
+		}
+		return po.Seller, po.Organization, nil
+	}
+
+	organizationIdentifier = po.OrganizationIdentifier
+	organization = po.Organization
+	if organizationIdentifier != "" && organization != "" {
+		return organizationIdentifier, organization, nil
+	}
+
+	// At this point we have to retrieve the owner information from the remote server
+	poMap := po.ContentAsMap
+
+	// Get the info to retrieve the productSpecification object from the server
+	prodSpecRefMap, ok := poMap["productSpecification"].(map[string]any)
+	if !ok {
+		return "", "", fmt.Errorf("DeduceProductOfferingOwner: productSpecification is nil or not a map for productOffering %s", po.ID)
+	}
+
+	if len(prodSpecRefMap) == 0 {
+		return "", "", fmt.Errorf("DeduceProductOfferingOwner: productSpecification is empty for productOffering %s", po.ID)
+	}
+
+	// Get the prodSpecID to retrieve the remote associated object
+	prodSpecID, _ := prodSpecRefMap["id"].(string)
+	if prodSpecID == "" {
+		return "", "", fmt.Errorf("DeduceProductOfferingOwner: productSpecification 'id' is nil or not a string for productOffering %s", po.ID)
+	}
+
+	// Use the 'id' field to retrieve the productSpecification object from the server
+	// After the call, the productSpecification object is already persisted locally with the owner information in the
+	// standard TMF format. We need to update the database in the format we need for efficient SQL queries.
+	productSpecification, _, err := tmf.RetrieveOrUpdateObject(dbconn, prodSpecID, "", "", LocalOrRemote)
+	if err != nil {
+		return "", "", fmt.Errorf("DeduceProductOfferingOwner: %w", err)
+	}
+
+	// There must be a relatedParty object
+	prodSpecRelatedParties, ok := productSpecification.ContentAsMap["relatedParty"].([]any)
+	if !ok {
+		return "", "", fmt.Errorf("DeduceProductOfferingOwner: relatedParty is nil for productSpecification %s", productSpecification.ID)
+	}
+
+	// One of the relatedParty items must be the one defining the owner
+	for _, rp := range prodSpecRelatedParties {
+		relatedParty, ok := rp.(map[string]any)
+		if !ok {
+			slog.Error("DeduceProductOfferingOwner: relatedParty is not a map", "productSpecification", productSpecification.ID)
+			continue
+		}
+
+		// We look for an entry "role" = "owner", in a case-insensitive way
+		role, ok := relatedParty["role"].(string)
+		if !ok {
+			slog.Error("DeduceProductOfferingOwner: relatedParty 'role' is nil or not a string", "productSpecification", productSpecification.ID)
+			continue
+		}
+		if strings.ToLower(role) != "owner" {
+			continue
+		}
+
+		// If "owner" entry found, use 'id' to retrieve the referenced object from the remote server.
+		// 'id' points to an Organization TMF object
+		ownerOrgID, ok := relatedParty["id"].(string)
+		if !ok {
+			slog.Error("DeduceProductOfferingOwner: relatedParty 'href' is nil or not a string", "productSpecification", productSpecification.ID)
+			continue
+		}
+
+		organizationObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, ownerOrgID, "", "", LocalOrRemote)
+		if err != nil {
+			slog.Error("DeduceProductOfferingOwner: retrieving organization object", "href", ownerOrgID, "productSpecification", productSpecification.ID, slogor.Err(err))
 			// We do not stop the loop. We may have other relatedParty objects
 			// with the owner information we need.
 			continue
@@ -1037,16 +1066,8 @@ func (tmf *TMFCache) RemoteRetrieveTMFObject(id string) (*TMFObject, error) {
 		return nil, fmt.Errorf("reply does not look as a JSON object from %s", url)
 	}
 
-	// Convert the JSON response to a map
-	var oMap map[string]any
-	err = json.Unmarshal(body, &oMap)
-	if err != nil {
-		slog.Error("parsing JSON response", "url", url, slogor.Err(err))
-		return nil, fmt.Errorf("parsing JSON response: %w", err)
-	}
-
-	// Create a TMFObject struct from the map
-	po, err := NewTMFObject(oMap, nil)
+	// Create the in-memory object
+	po, err := TMFObjectFromBytes(body)
 	if err != nil {
 		slog.Error(err.Error())
 		return nil, err
@@ -1141,3 +1162,137 @@ var ResourceToManagementSystem = map[string]string{
 	"usage":                      "usageManagement",
 	"usageSpecification":         "usageManagement",
 }
+
+// func (tmf *TMFCache) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error) {
+// 	tmf.cloneMutex.Lock()
+// 	defer tmf.cloneMutex.Unlock()
+
+// 	visitedObjects := make(map[string]bool)
+
+// 	// We will retrieve the objects in chunks of 100, looping until we get a reply with no objects
+// 	limit := 10
+// 	offset := 0
+
+// 	// We are only interested in ProductOfferings which are launched or active
+// 	// to the market (lifecycleStatus=Launched,Active)
+// 	lifecycleStatus := "Launched,Active"
+
+// 	var poList []*TMFObject
+
+// 	for {
+
+// 		// Get the list of catalogues from the DOME server
+// 		url := fmt.Sprintf("%s/catalog/catalog?limit=%d&offset=%d&lifecycleStatus=%s", tmf.domeServer, limit, offset, lifecycleStatus)
+// 		res, err := http.Get(url)
+// 		if err != nil {
+// 			slog.Error(err.Error())
+// 			return nil, nil, err
+// 		}
+// 		body, err := io.ReadAll(res.Body)
+// 		res.Body.Close()
+// 		if res.StatusCode > 299 {
+// 			slog.Error("Response failed", "status", res.StatusCode, "body", body)
+// 			return nil, nil, err
+// 		}
+// 		if err != nil {
+// 			slog.Error("reading response body", slogor.Err(err))
+// 			return nil, nil, err
+// 		}
+
+// 		// Parse the JSON response
+// 		var poListMap []map[string]any
+// 		err = json.Unmarshal(body, &poListMap)
+// 		if err != nil {
+// 			slog.Error("parsing JSOn response", slogor.Err(err))
+// 			return nil, nil, err
+// 		}
+
+// 		// Check if we should termninate the loop because there are no more objects
+// 		if len(poListMap) == 0 {
+// 			break
+// 		}
+
+// 		// Process the list
+// 		for _, oMap := range poListMap {
+
+// 			po, err := NewTMFObject(oMap, nil)
+// 			if err != nil {
+// 				slog.Error("creating NewTMFObject", slogor.Err(err))
+// 				continue
+// 			}
+
+// 			// There must be a relatedParty object
+// 			relatedPartyList, ok := po.ContentAsMap["relatedParty"].([]any)
+// 			if !ok {
+// 				slog.Error("invalid relatedParty object")
+// 				out, _ := json.MarshalIndent(oMap, "", "   ")
+// 				fmt.Println(string(out))
+// 				continue
+// 			}
+
+// 			if relatedPartyList == nil {
+// 				slog.Error("relatedParty is nil")
+// 				return nil, nil, fmt.Errorf("relatedParty is nil")
+// 			}
+
+// 			// One of the relatedParty items must be the one defining the owner
+// 			for _, rp := range relatedPartyList {
+// 				rpMap := rp.(map[string]any)
+// 				if strings.ToLower(rpMap["role"].(string)) == "owner" {
+// 					owner, _, err := tmf.RetrieveOrUpdateObject(nil, rpMap["href"].(string), "", "", LocalOrRemote)
+// 					if err != nil {
+// 						slog.Error(err.Error())
+// 						return nil, nil, err
+// 					}
+
+// 					// The array 'externalReference' contains the ID of the organization
+// 					ownerReference := owner.ContentAsMap["externalReference"].([]any)
+// 					if ownerReference == nil {
+// 						slog.Info("externalReference is nil")
+// 						return nil, nil, fmt.Errorf("externalReference is nil")
+// 					}
+
+// 					for _, extRef := range ownerReference {
+// 						extRefMap := extRef.(map[string]any)
+// 						if extRefMap["externalReferenceType"] == "idm_id" {
+// 							oid := extRefMap["name"].(string)
+// 							organization := owner.ID
+
+// 							// Now that we have the owner, update the local database for the productSpecification object
+// 							if len(owner.OrganizationIdentifier) == 0 {
+// 								owner, _ = owner.SetOwner(oid, organization)
+// 								err := tmf.LocalUpsertTMFObject(nil, owner)
+// 								if err != nil {
+// 									slog.Error(err.Error())
+// 									return nil, nil, err
+// 								}
+// 							}
+// 							if len(po.OrganizationIdentifier) == 0 {
+// 								po, _ = po.SetOwner(oid, organization)
+// 								err := tmf.LocalUpsertTMFObject(nil, po)
+// 								if err != nil {
+// 									slog.Error(err.Error())
+// 									return nil, nil, err
+// 								}
+// 							}
+
+// 							poList = append(poList, po)
+// 							break
+// 						}
+// 					}
+
+// 				}
+// 			}
+
+// 			visitedObjects[po.ID] = true
+
+// 		}
+
+// 		// Go and retrieve the next chunk of objects
+// 		offset = offset + limit
+
+// 	}
+
+// 	return poList, visitedObjects, nil
+
+// }

@@ -19,6 +19,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	conf "github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 
 	"gitlab.com/greyxor/slogor"
 	starjson "go.starlark.net/lib/json"
@@ -164,7 +165,7 @@ func NewPDP(
 	m.httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return ErrorRedirectsNotAllowed
+			return tmfcache.ErrorRedirectsNotAllowed
 		},
 	}
 

@@ -13,6 +13,7 @@ import (
 	"github.com/hesusruiz/domeproxy/config"
 	"github.com/hesusruiz/domeproxy/internal/middleware"
 	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"github.com/rs/cors"
 )
 
@@ -28,8 +29,8 @@ func TMFServerHandler(
 	config *config.Config,
 ) (execute func() error, interrupt func(error), err error) {
 
-	// Set the defaul configuration, depending on the environment (production, development, ...)
-	tmfDb, err := pdp.NewTMFCache(config)
+	// Set the default configuration, depending on the environment (production, development, ...)
+	tmfDb, err := tmfcache.NewTMFCache(config)
 	if err != nil {
 		return nil, nil, err
 	}

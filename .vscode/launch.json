@@ -5,6 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "get",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "main.go",
+            "args": ["get", "urn:ngsi-ld:individual:05e38150-0506-4e67-953d-fa23aa7d7782"],
+            "cwd": "."
+        },
+        {
             "name": "pruebas",
             "type": "go",
             "request": "launch",
@@ -16,8 +25,8 @@
             "type": "go",
             "request": "launch",
             "mode": "debug",
-            "program": "cmd/sync/main.go",
-            "args": ["-delete"],
+            "program": "main.go",
+            "args": [""],
             "cwd": "."
         },
         {
@@ -37,13 +46,6 @@
             "program": "main.go",
             "args": ["", "-debug"],
             "cwd": "."
-        },
-        {
-            "name": "db.go",
-            "type": "go",
-            "request": "launch",
-            "mode": "debug",
-            "program": "cmd/db.go",
         },
 
 

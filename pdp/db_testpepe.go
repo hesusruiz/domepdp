@@ -3,6 +3,8 @@ package pdp
 import (
 	"net/url"
 	"testing"
+
+	"github.com/hesusruiz/domeproxy/tmfcache"
 )
 
 func Test_buildWhereFromParms(t *testing.T) {
@@ -48,7 +50,7 @@ func Test_buildWhereFromParms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, args := buildSelectFromParms(tt.args.pr, tt.args.qv); got != tt.want {
+			if got, args := tmfcache.BuildSelectFromParms(tt.args.pr, tt.args.qv); got != tt.want {
 				_ = args
 				t.Errorf("buildWhereFromParms() = %v, want %v", got, tt.want)
 			}

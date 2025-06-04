@@ -21,6 +21,7 @@ import (
 	"github.com/hesusruiz/domeproxy/config"
 	mdl "github.com/hesusruiz/domeproxy/internal/middleware"
 	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )
@@ -74,7 +75,7 @@ func (h *MyLogHandler) WithGroup(name string) slog.Handler {
 func addHttpRoutes(
 	_ *config.Config,
 	mux *http.ServeMux,
-	tmf *pdp.TMFCache,
+	tmf *tmfcache.TMFCache,
 	rulesEngine *pdp.PDP,
 ) {
 
@@ -117,7 +118,7 @@ func addHttpRoutes(
 			r.Header.Set("X-Original-Operation", "LIST")
 
 			// tmfObjectList, err := retrieveList(tmf, tmfResource, r)
-			tmfObjectList, err := pdp.HandleLISTAuth(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource)
+			tmfObjectList, err := pdp.AuthorizeLIST(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource)
 			if err != nil {
 				mdl.ErrorTMF(w, http.StatusForbidden, "error retrieving list", err.Error())
 				logger.Error("retrieving", slogor.Err(err))
@@ -168,7 +169,7 @@ func addHttpRoutes(
 			// This is a semantic alias of the operation being requested
 			r.Header.Set("X-Original-Operation", "READ")
 
-			tmfObject, err := pdp.HandleREADAuth(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource, tmfID)
+			tmfObject, err := pdp.AuthorizeREAD(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource, tmfID)
 			if err != nil {
 				mdl.ErrorTMF(w, http.StatusForbidden, "error retrieving", err.Error())
 				slog.Error("retrieving", slogor.Err(err))
@@ -207,7 +208,7 @@ func addHttpRoutes(
 			// This is a semantic alias of the operation being requested
 			r.Header.Set("X-Original-Operation", "CREATE")
 
-			tmfObject, err := pdp.HandleCREATEAuth(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource)
+			tmfObject, err := pdp.AuthorizeCREATE(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource)
 			if err != nil {
 				mdl.ErrorTMF(w, http.StatusForbidden, "error creating", err.Error())
 				slog.Error("creating", slogor.Err(err))
@@ -241,7 +242,7 @@ func addHttpRoutes(
 			// This is a semantic alias of the operation being requested
 			r.Header.Set("X-Original-Operation", "UPDATE")
 
-			tmfObject, err := pdp.HandleUPDATEAuth(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource, tmfID)
+			tmfObject, err := pdp.AuthorizeUPDATE(logger, tmf, rulesEngine, r, tmfManagementSystem, tmfResource, tmfID)
 			if err != nil {
 				mdl.ErrorTMF(w, http.StatusForbidden, "error retrieving", err.Error())
 				slog.Error("retrieving", slogor.Err(err))
