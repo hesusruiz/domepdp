@@ -10,7 +10,16 @@
             "request": "launch",
             "mode": "debug",
             "program": "main.go",
-            "args": ["get", "urn:ngsi-ld:individual:05e38150-0506-4e67-953d-fa23aa7d7782"],
+            "args": ["get", "urn:ngsi-ld:product-specification:0d6c0509-18ce-4c36-8f46-5969c9122cd5"],
+            "cwd": "."
+        },
+        {
+            "name": "fix",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "main.go",
+            "args": ["fix", "organization"],
             "cwd": "."
         },
         {
@@ -26,7 +35,7 @@
             "request": "launch",
             "mode": "debug",
             "program": "main.go",
-            "args": [""],
+            "args": ["sync","--delete", "-e", "dev2", "-b"],
             "cwd": "."
         },
         {

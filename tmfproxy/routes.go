@@ -181,7 +181,7 @@ func addHttpRoutes(
 				"ETag": tmfObject.ETag(),
 			}
 
-			mdl.ReplyTMF(w, tmfObject.ContentAsJSON, additionalHeaders)
+			mdl.ReplyTMF(w, tmfObject.GetContentAsJSON(), additionalHeaders)
 
 		})
 
@@ -216,13 +216,13 @@ func addHttpRoutes(
 			}
 
 			// Use Location HTTP header to specify the URI of a newly created resource (POST)
-			location := "/tmf-api/" + tmfManagementSystem + "/v4/" + tmfResource + "/" + tmfObject.ID
+			location := "/tmf-api/" + tmfManagementSystem + "/v4/" + tmfResource + "/" + tmfObject.GetID()
 			additionalHeaders := map[string]string{
 				"Location": location,
 			}
 
 			// Send the reply in the TMF format
-			mdl.ReplyTMF(w, tmfObject.ContentAsJSON, additionalHeaders)
+			mdl.ReplyTMF(w, tmfObject.GetContentAsJSON(), additionalHeaders)
 
 		})
 
@@ -255,7 +255,7 @@ func addHttpRoutes(
 			}
 
 			// Send the reply in the TMF format
-			mdl.ReplyTMF(w, tmfObject.ContentAsJSON, additionalHeaders)
+			mdl.ReplyTMF(w, tmfObject.GetContentAsJSON(), additionalHeaders)
 
 		})
 

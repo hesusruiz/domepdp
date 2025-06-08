@@ -18,7 +18,7 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	var o *tmfcache.TMFObject
+	var o *tmfcache.TMFGeneralObject
 
 	err := o.FromMap(
 		map[string]any{

@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/hesusruiz/domeproxy/config"
 	conf "github.com/hesusruiz/domeproxy/config"
 	"github.com/hesusruiz/domeproxy/tmfcache"
 
@@ -1105,7 +1106,7 @@ func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found
 	verifierPublicKeyFunc := func(*jwt.Token) (any, error) {
 		vk, err := m.VerificationJWK()
 		if err != nil {
-			return nil, err
+			return nil, config.Error(err)
 		}
 		slog.Debug("publicKeyFunc", "key", vk)
 		return vk.Key, nil
@@ -1114,7 +1115,7 @@ func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found
 	// Validate and verify the token
 	token, err = jwt.NewParser().ParseWithClaims(tokString, &theClaims, verifierPublicKeyFunc)
 	if err != nil {
-		return nil, false, fmt.Errorf("error parsing token: %w", err)
+		return nil, false, config.Errorf("error parsing token: %w", err)
 	}
 
 	jwtmapClaims := token.Claims.(*MapClaims)

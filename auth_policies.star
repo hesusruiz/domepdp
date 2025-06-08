@@ -17,8 +17,8 @@ four objects that can be used to implement the authorization policies: 'request'
     "path": the url path (does not include the the query parameters).
     "query": a dictionary with all the query parameters in the url.
 
-    "tmf_resource": the TMForum resource being accessed (eg., productOffering, catalog, etc.).
-    "tmf_id": the identifier of the TMForum object being accessed.
+    "resource": the TMForum resource being accessed (eg., productOffering, catalog, etc.).
+    "id": the identifier of the TMForum object being accessed.
 
     "headers": a dictionary with the headers in the HTTP request.
 
@@ -34,19 +34,25 @@ four objects that can be used to implement the authorization policies: 'request'
 "user" is an object with some properties extracted from the token to facilitate writing
     rules. It is just a convenience object and the rules can always access the token if needed.
 
+    "isAuthenticated" is boolean which is True if the request came with a valid access token.
     "organizationIdentifier" is the identifier for the mandator.
     "isLEAR" is a boolean which is True if the user has the "Onboarding" power.
     "isOwner" is a boolean which is True if the TMF object is owned by the organization of the user.
     "country" is the two letter code for the country of incorporation of the organization.
+    "isSeller", "isBuyer", "isSellerOperator" and "isBuyerOperator" are booleans reporting if the 
+        user has that role in the TMF object being accessed
 
 "tmf" has the contents of the TMForum object that the remote user tries to access.
-    This can be used by the policies to determine if access is granted or not.
-    To simplify writing policy rules, the first level sub-objects inside the 'tmf'
-    object include, among others:
+    The policies can access any component of the object, but to simplify writing policy rules,
+    the system makes available some calculated fist level sub-objects inside the 'tmf' object:
 
-    "type": the type of TMForum being accessed, like 'productOffering' or 'productSpecification'.
+    "resource": the resource name of the TMForum object being accessed, like 'productOffering' or 'productSpecification'.
     "organizationIdentifier": the identifier of the company who owns the TMForum object,
         which is the company that created the object in the DOME Marketplace.
+    "permittedCountries" and "prohibitedCountries" which are lists of countries acording to the
+        country restriction policies embedded in the TMForum object.
+    "permittedOperators" and "prohibitedOperators" which are lists of operator identities acording to the
+        operator restriction policies embedded in the TMForum object.
 
 The policies below are an example that can be used as starting point by the policy writer.
 They can be customized as needed, using the data in the 'input' object for making
@@ -62,10 +68,15 @@ allowed_countries = ["",
 
 forbidden_countries = ["RU"]
 
+# These are just examples of policies that you can use to define yours.
+# You can add and delete anything that you need for implementing your policies.
+# The only thing you can not change is the name of the function, which must be 'authorize'.
 def authorize():
+
+    # The 'print' function writes to the logging system 
     print("Inside authorize for", input.request.action)
     if input.user.isAuthenticated:
-        print("user:", input.user.organizationIdentifier,"Is LEAR?", input.user.isLEAR)
+        print("user:", input.user.organizationIdentifier, "Is LEAR?", input.user.isLEAR)
     else:
         print("user is not authenticated")
 
@@ -81,6 +92,7 @@ def authorize():
         print("forbidden because country not allowed:", input.user.country)
         return False
 
+    # You can take different decisions depending on the action that the user is intending to do
     if input.request.action == "UPDATE":
         return True
 
@@ -90,8 +102,8 @@ def authorize():
     return True
 
     # *********************************************************************
-    # The previous rule stops evaluation of rules beyond this point.
-    # The rules below are examples of what fields are available for rules.
+    # The previous statement ('return') stops evaluation of rules beyond this point.
+    # The rules below are additional examples of what fields are available for rules.
     # They are not executed but you can copy/paste and adapt.
     # *********************************************************************
 
@@ -99,15 +111,8 @@ def authorize():
     if not input.user.isOwner:
         return False
 
-    # The above rule uses convenience properties made available to the rule engine to simplify writing the rules.
-    # That rule is equivalent to the following:
-    #if input.request.organizationIdentifier != input.tmf.owner.organizationIdentifier:
-    #    return False
-
     # You can also access the powers of the remote user, available in the LEARCredential.
-    # You can use variables to facilitate writing the rules. Also, in addition to being
-    # used in rule evaluation, they can be written in the access log using the
-    # 'print' function. For example:
+    # You can use variables to facilitate writing the rules. For example:
 
     mandator = input.token.vc.credentialSubject.mandate.mandator
     mandatee = input.token.vc.credentialSubject.mandate.mandatee
@@ -117,7 +122,7 @@ def authorize():
 
     # An alternative syntax is available if you are more comfortable with it:
     also_the_mandator = input["token"]["vc"]["credentialSubject"]["mandate"]["mandator"]
-    also_the_powers = also_the_mandator["organizationIdentifier"]
+    also_the_user_organization = also_the_mandator["organizationIdentifier"]
 
     # This is just in case we reach here for some reason
     return False
@@ -128,7 +133,9 @@ def authorize():
 # Auxiliary functions
 ###############################################################################
 
-
+# Policies can be as complex as you want, and functions can help to structure them.
+# This is an example of a function that can be used to abstract some policy rules and
+# facilitates reuse in your main rules section.
 def credentialIncludesPower(credential, action, function, domain):
     """credentialIncludesPower determines if a given power is incuded in the credential.
 

@@ -5,7 +5,6 @@
 package config
 
 import (
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -14,21 +13,13 @@ import (
 	"github.com/hesusruiz/domeproxy/internal/sqlogger"
 )
 
-type Environment int
-
-const DOME_PRO Environment = 0
-const DOME_DEV2 Environment = 1
-const DOME_SBX Environment = 2
-const DOME_LCL Environment = 3
-
-const PRO_dbname = "./tmf.db"
-const DEV2_dbname = "./tmf-dev2.db"
-const SBX_dbname = "./tmf-sbx.db"
-const LCL_dbname = "./tmf-lcl.db"
-
-const DefaultClonePeriod = 10 * time.Minute
-
 type Config struct {
+
+	// DOME operator did
+	// TODO: set the proper identification when the DOME foundation is created
+	DOMEOperatorDid  string
+	DOMEOperatorName string
+
 	// Indicates the environment (SBX, DEV2, PRO, LCL) where the proxy is running.
 	// It is used to determine the DOME host and the database name.
 	// It is also used to determine the policy file name, which is used to load the policies from the DOME.
@@ -52,6 +43,10 @@ type Config struct {
 	internalUpstreamPodHosts *sync.Map
 	internal                 bool
 	usingBAEProxy            bool
+
+	// fixMode enables "smart" automait fixing of objects so they comply with the DOME specs
+	// There is no magic. however, and there are things that can not be done.
+	fixMode bool
 
 	resourceToPath *ResourceToExternalPathPrefix
 
@@ -80,6 +75,23 @@ type Config struct {
 	// LogLevel is a slog.LevelVar that can be set to different log levels (e.g. Debug, Info, Warn, Error).
 	LogLevel *slog.LevelVar
 }
+
+const DOMEOperatorDid = "did:elsi:VATES-11111111K"
+const DOMEOperatorName = "DOME Foundation"
+
+type Environment int
+
+const DOME_PRO Environment = 0
+const DOME_DEV2 Environment = 1
+const DOME_SBX Environment = 2
+const DOME_LCL Environment = 3
+
+const PRO_dbname = "./tmf.db"
+const DEV2_dbname = "./tmf-dev2.db"
+const SBX_dbname = "./tmf-sbx.db"
+const LCL_dbname = "./tmf-lcl.db"
+
+const DefaultClonePeriod = 10 * time.Minute
 
 var proConfig = &Config{
 	Environment:       DOME_PRO,
@@ -184,7 +196,7 @@ func LoadConfig(
 
 	mylogHandler, err := sqlogger.NewSQLogHandler(&sqlogger.Options{Level: logLevel, NoColor: nocolor})
 	if err != nil {
-		panic(err)
+		return nil, Error(err)
 	}
 
 	logger := slog.New(
@@ -253,7 +265,7 @@ func (c *Config) GetUpstreamHost(resourceName string) string {
 // GetAllUpstreamHosts provides a typed method to retrieve all upstream hosts
 func (c *Config) GetAllUpstreamHosts() map[string]string {
 	hosts := make(map[string]string)
-	c.internalUpstreamPodHosts.Range(func(key, value interface{}) bool {
+	c.internalUpstreamPodHosts.Range(func(key, value any) bool {
 		hosts[key.(string)] = value.(string)
 		return true
 	})
@@ -265,11 +277,11 @@ func (c *Config) GetAllUpstreamHosts() map[string]string {
 func (c *Config) GetInternalPodHostFromId(id string) (string, error) {
 	resourceName, err := FromIdToResourceName(id)
 	if err != nil {
-		return "", err
+		return "", Error(err)
 	}
 	podHost := c.GetUpstreamHost(resourceName)
 	if podHost == "" {
-		return "", fmt.Errorf("no internal pod host found for resource: %s", resourceName)
+		return "", Errorf("no internal pod host found for resource: %s", resourceName)
 	}
 	return podHost, nil
 }
@@ -281,12 +293,12 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 		internalServiceDomainName := c.GetUpstreamHost(resourceName)
 		if internalServiceDomainName == "" {
-			return "", fmt.Errorf("no internal pod host found for resource: %s", resourceName)
+			return "", Errorf("no internal pod host found for resource: %s", resourceName)
 		}
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
 		if !ok {
-			return "", fmt.Errorf("unknown object type: %s", resourceName)
+			return "", Errorf("unknown object type: %s", resourceName)
 		}
 
 		return "https://" + internalServiceDomainName + pathPrefix, nil
@@ -300,8 +312,9 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 		// pathPrefix := defaultBAEResourceToPathPrefix[resourceName]
 		pathPrefix := GeneratedDefaultResourceToBAEPathPrefix[resourceName]
 		if pathPrefix == "" {
-			slog.Error("unknown object type", "type", resourceName)
-			return "", fmt.Errorf("unknown object type: %s", resourceName)
+			err := Errorf("unknown resource: %s", resourceName)
+			slog.Error(err.Naked().Error())
+			return "", err
 		}
 		// We are accessing the TMForum APIs using the BAE Proxy
 		return "https://" + c.BAEProxyDomain + pathPrefix, nil
@@ -310,7 +323,7 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
 		if !ok {
-			return "", fmt.Errorf("unknown object type: %s", resourceName)
+			return "", Errorf("unknown object type: %s", resourceName)
 		}
 
 		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
@@ -327,7 +340,7 @@ func (c *Config) GetHostAndPathFromId(id string) (string, error) {
 
 	resourceName, err := FromIdToResourceName(id)
 	if err != nil {
-		return "", err
+		return "", Error(err)
 	}
 
 	// Inside the DOME instance
@@ -335,12 +348,12 @@ func (c *Config) GetHostAndPathFromId(id string) (string, error) {
 
 		internalServiceDomainName := c.GetUpstreamHost(resourceName)
 		if internalServiceDomainName == "" {
-			return "", fmt.Errorf("no internal pod host found for resource: %s", resourceName)
+			return "", Errorf("no internal pod host found for resource: %s", resourceName)
 		}
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
 		if !ok {
-			return "", fmt.Errorf("unknown object type: %s", id)
+			return "", Errorf("unknown object type: %s", id)
 		}
 
 		return "https://" + internalServiceDomainName + pathPrefix, nil
@@ -353,8 +366,9 @@ func (c *Config) GetHostAndPathFromId(id string) (string, error) {
 		// Each type of object has a different path prefix
 		pathPrefix := defaultBAEResourceToPathPrefix[resourceName]
 		if pathPrefix == "" {
-			slog.Error("unknown object type", "type", resourceName)
-			return "", fmt.Errorf("unknown object type: %s", resourceName)
+			err := Errorf("unknown object type: %s", resourceName)
+			slog.Error(err.Naked().Error())
+			return "", err
 		}
 		// We are accessing the TMForum APIs using the BAE Proxy
 		return "https://" + c.BAEProxyDomain + pathPrefix, nil
@@ -363,7 +377,7 @@ func (c *Config) GetHostAndPathFromId(id string) (string, error) {
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(id)
 		if !ok {
-			return "", fmt.Errorf("unknown object type: %s", resourceName)
+			return "", Errorf("unknown object type: %s", resourceName)
 		}
 
 		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
@@ -395,16 +409,16 @@ func FromIdToResourceName(id string) (string, error) {
 	// Extract the different components
 	idParts := strings.Split(id, ":")
 	if len(idParts) < 4 {
-		return "", fmt.Errorf("invalid ID format: %s", id)
+		return "", Errorf("invalid ID format: %s", id)
 	}
 
 	if idParts[0] != "urn" || idParts[1] != "ngsi-ld" {
-		return "", fmt.Errorf("invalid ID format: %s", id)
+		return "", Errorf("invalid ID format: %s", id)
 	}
 
 	words := strings.Split(idParts[2], "-")
 	if len(words) == 0 || words[0] == "" {
-		return "", fmt.Errorf("invalid ID format: %s", id)
+		return "", Errorf("invalid ID format: %s", id)
 	}
 
 	key := words[0]
@@ -565,3 +579,18 @@ const ProductSpecification = "productSpecification"
 const ProductOfferingPrice = "productOfferingPrice"
 const ServiceSpecification = "serviceSpecification"
 const ResourceSpecification = "resourceSpecification"
+const Category = "category"
+const Catalog = "catalog"
+const Organization = "organization"
+
+var RootBAEObjects = []string{
+	"productOffering",
+	"organization",
+	"individual",
+	"category",
+	"catalog",
+	"productSpecification",
+	"productOfferingPrice",
+}
+
+const schemaLocationRelatedParty = "https://raw.githubusercontent.com/DOME-Marketplace/dome-odrl-profile/refs/heads/main/schemas/simplified/RelatedPartyRef.schema.json"

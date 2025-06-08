@@ -26,27 +26,27 @@ import (
 //  2. As a 'pure' PDP, acting as an authorization server for some upstream PIP like NGINX. In this
 //     mode, requests are intercepted by the PIP which asks the PDP for an authorization decision.
 func TMFServerHandler(
-	config *config.Config,
+	cfg *config.Config,
 ) (execute func() error, interrupt func(error), err error) {
 
 	// Set the default configuration, depending on the environment (production, development, ...)
-	tmfDb, err := tmfcache.NewTMFCache(config)
+	tmfDb, err := tmfcache.NewTMFCache(cfg, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, config.Error(err)
 	}
 
 	mux := http.NewServeMux()
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	rulesEngine, err := pdp.NewPDP(config, nil, nil)
+	rulesEngine, err := pdp.NewPDP(cfg, nil, nil)
 	if err != nil {
-		panic(err)
+		return nil, nil, config.Error(err)
 	}
 
-	addAdminRoutes(config, mux, tmfDb, rulesEngine)
+	addAdminRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Add the TMForum API routes
-	addHttpRoutes(config, mux, tmfDb, rulesEngine)
+	addHttpRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Enable CORS with permissive options.
 	handler := cors.AllowAll().Handler(mux)
@@ -59,7 +59,7 @@ func TMFServerHandler(
 
 	// An HTTP server with sensible defaults (no need to make them configurable)
 	s := &http.Server{
-		Addr:           config.PDPAddress,
+		Addr:           cfg.PDPAddress,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
@@ -70,7 +70,7 @@ func TMFServerHandler(
 	startServer := func() error {
 
 		// Start a cloning process immediately
-		slog.Info("Starting PDP and TMForum API server", "addr", config.PDPAddress)
+		slog.Info("Starting PDP and TMForum API server", "addr", cfg.PDPAddress)
 
 		// Start a backgroud process to clone the database
 		// We make an initial cloning and then repeat every ClonePeriod (10 minutes by default)
@@ -84,7 +84,7 @@ func TMFServerHandler(
 			elapsed := time.Since(start)
 			slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
 
-			c := time.Tick(config.ClonePeriod)
+			c := time.Tick(cfg.ClonePeriod)
 			for next := range c {
 				slog.Info("started cloning", "time", next.String())
 
@@ -97,7 +97,7 @@ func TMFServerHandler(
 		}()
 
 		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			return err
+			return config.Error(err)
 		}
 		return nil
 

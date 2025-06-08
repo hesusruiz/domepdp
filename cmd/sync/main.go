@@ -68,7 +68,7 @@ func main() {
 
 	tmfConfig := config.DefaultConfig(server, false, true)
 
-	tmf, err := tmfcache.NewTMFCache(tmfConfig)
+	tmf, err := tmfcache.NewTMFCache(tmfConfig, false)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		out, err := json.MarshalIndent(po.ContentAsMap, "", "   ")
+		out, err := json.MarshalIndent(po.GetContentAsMap(), "", "   ")
 		if err != nil {
 			panic(err)
 		}
