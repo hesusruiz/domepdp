@@ -58,6 +58,8 @@ type Config struct {
 	// ExternalTMFDomain for TMF apis
 	ExternalTMFDomain string
 
+	TMFURLPrefix string
+
 	// VerifierServer is the URL of the verifier server, which is used to verify the access tokens.
 	VerifierServer string
 
@@ -109,6 +111,7 @@ var proConfig = &Config{
 	PolicyFileName:    "auth_policies.star",
 	BAEProxyDomain:    "dome-marketplace.eu",
 	ExternalTMFDomain: "tmf.dome-marketplace.eu",
+	TMFURLPrefix:      "https://tmf.dome-marketplace.eu",
 	VerifierServer:    "https://verifier.dome-marketplace.eu",
 	Dbname:            PRO_dbname,
 	ClonePeriod:       DefaultClonePeriod,
@@ -119,6 +122,7 @@ var dev2Config = &Config{
 	PolicyFileName:    "auth_policies.star",
 	BAEProxyDomain:    "dome-marketplace-dev2.org",
 	ExternalTMFDomain: "tmf.dome-marketplace-dev2.org",
+	TMFURLPrefix:      "https://tmf.dome-marketplace-dev2.org",
 	VerifierServer:    "https://verifier.dome-marketplace-dev2.org",
 	Dbname:            DEV2_dbname,
 	ClonePeriod:       DefaultClonePeriod,
@@ -129,6 +133,7 @@ var sbxConfig = &Config{
 	PolicyFileName:    "auth_policies.star",
 	BAEProxyDomain:    "dome-marketplace-sbx.org",
 	ExternalTMFDomain: "tmf.dome-marketplace-sbx.org",
+	TMFURLPrefix:      "https://tmf.dome-marketplace-sbx.org",
 	VerifierServer:    "https://verifier.dome-marketplace-sbx.org",
 	Dbname:            SBX_dbname,
 	ClonePeriod:       DefaultClonePeriod,
@@ -139,6 +144,7 @@ var lclConfig = &Config{
 	PolicyFileName:    "auth_policies.star",
 	BAEProxyDomain:    "dome-marketplace-lcl.org",
 	ExternalTMFDomain: "tmf.dome-marketplace-lcl.org",
+	TMFURLPrefix:      "https://tmf.dome-marketplace-lcl.org",
 	VerifierServer:    "https://verifier.dome-marketplace-lcl.org",
 	Dbname:            LCL_dbname,
 	ClonePeriod:       DefaultClonePeriod,
@@ -149,6 +155,7 @@ var isbeConfig = &Config{
 	PolicyFileName:    "auth_policies.star",
 	BAEProxyDomain:    "tmf.mycredential.eu",
 	ExternalTMFDomain: "tmf.mycredential.eu",
+	TMFURLPrefix:      "http://localhost:8620",
 	VerifierServer:    "https://verifier.dome-marketplace-lcl.org",
 	Dbname:            ISBE_dbname,
 	ClonePeriod:       DefaultClonePeriod,
@@ -352,7 +359,9 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 	}
 
-	// Outside the DOME instance
+	// We are outside the DOME instance, but there are two cases:
+	// 1. We are using the BAE Proxy (unsupported, only for tests).
+	// 2. We are using a "real" exposed TMForum API.
 	if c.usingBAEProxy {
 
 		// Each type of object has a different path prefix
@@ -373,7 +382,7 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 			return "", errl.Errorf("unknown object type: %s", resourceName)
 		}
 
-		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
+		return c.TMFURLPrefix + pathPrefix, nil
 
 	}
 
@@ -555,19 +564,22 @@ var defaultResourceToPathPrefix = map[string]string{
 // We use a sync.Map because of very frequent reads and seldom writes, so it is more efficient than a regular map with a mutex.
 type ResourceToExternalPathPrefix struct {
 	externalResourceMap sync.Map
-	apiVersion          string // The API version for the TMF APIs, e.g. "v4".
+	environment         Environment
 }
 
 func NewResourceToExternalPathPrefix(environment Environment) *ResourceToExternalPathPrefix {
 	r := &ResourceToExternalPathPrefix{}
+
+	r.environment = environment
+
+	apiVersion := "v4" // Default API version for TMF APIs
+
 	if environment == ISBE {
-		r.apiVersion = "v5" // ISBE uses v5 of the TMF APIs
-	} else {
-		r.apiVersion = "v4"
+		apiVersion = "v5" // ISBE uses v5 of the TMF APIs
 	}
 
 	for resource, pathPrefix := range defaultResourceToPathPrefix {
-		fullPathPrefix := pathPrefix + "/" + r.apiVersion + "/" + resource
+		fullPathPrefix := pathPrefix + "/" + apiVersion + "/" + resource
 		r.externalResourceMap.Store(resource, fullPathPrefix)
 	}
 

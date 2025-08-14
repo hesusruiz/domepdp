@@ -73,7 +73,7 @@ func (h *MyLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func addHttpRoutes(
-	_ *config.Config,
+	cc *config.Config,
 	mux *http.ServeMux,
 	tmf *tmfcache.TMFCache,
 	rulesEngine *pdp.PDP,
@@ -87,6 +87,43 @@ func addHttpRoutes(
 			slog.Default().Handler(),
 		),
 	)
+
+	proxyPass := func(w http.ResponseWriter, r *http.Request) {
+
+		// tmfManagementSystem := r.PathValue("tmfAPI")
+		// tmfResource := r.PathValue("tmfResource")
+
+		logger.Info("Proxy Pass", mdl.RequestID(r), "url", r.URL.Path)
+
+		url := cc.TMFURLPrefix + r.URL.Path
+
+		// url := cc.TMFURLPrefix + "/tmf-api/" + tmfManagementSystem + "/v5/" + tmfResource
+
+		res, err := http.Get(url)
+		if err != nil {
+			mdl.ErrorTMF(w, http.StatusInternalServerError, "error retrieving entrypoint", err.Error())
+			logger.Error("retrieving", "url", url, slogor.Err(err))
+			return
+		}
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode > 299 {
+			mdl.ErrorTMF(w, http.StatusInternalServerError, "error retrieving entrypoint", res.Status)
+			logger.Error("retrieving", "url", url, "satus", res.Status)
+			return
+		}
+		if err != nil {
+			mdl.ErrorTMF(w, http.StatusInternalServerError, "error retrieving entrypoint", err.Error())
+			logger.Error("retrieving", "url", url, slogor.Err(err))
+			return
+		}
+
+		contenType := res.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", contenType)
+
+		w.Write(body)
+
+	}
 
 	// ****************************************************
 	// Set the route needed for acting as a pure PDP.
@@ -102,6 +139,14 @@ func addHttpRoutes(
 	})
 
 	// Retrieve the list of objects according to the parameters specified in the HTTP request
+	mux.HandleFunc("GET /tmf-api/productCatalogManagement/v5/api-docs/{$}",
+		func(w http.ResponseWriter, r *http.Request) {
+
+			proxyPass(w, r)
+
+		})
+
+	// Retrieve the list of objects according to the parameters specified in the HTTP request
 	mux.HandleFunc("GET /tmf-api/{tmfAPI}/{version}/{tmfResource}",
 		func(w http.ResponseWriter, r *http.Request) {
 
@@ -109,6 +154,16 @@ func addHttpRoutes(
 			tmfResource := r.PathValue("tmfResource")
 
 			logger.Info("GET LIST", mdl.RequestID(r), "api", tmfManagementSystem, "type", tmfResource)
+
+			if _, err := cc.GetHostAndPathFromResourcename(tmfResource); err != nil {
+				proxyPass(w, r)
+				return
+			}
+
+			// if tmfResource == "entrypoint" || tmfResource == "openapi" || tmfResource == "api-docs" {
+			// 	proxyPass(w, r)
+			// 	return
+			// }
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())
@@ -161,6 +216,11 @@ func addHttpRoutes(
 			tmfID := r.PathValue("id")
 
 			logger.Info("GET Object", mdl.RequestID(r), "api", tmfManagementSystem, "type", tmfResource, "tmfid", tmfID)
+
+			if tmfResource == "api-docs" {
+				proxyPass(w, r)
+				return
+			}
 
 			// Set the proper fields in the request
 			r.Header.Set("X-Original-URI", r.URL.RequestURI())

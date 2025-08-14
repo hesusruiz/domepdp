@@ -210,7 +210,6 @@ func AuthorizeREAD(
 	// var local bool
 	ro, local, err := tmfCache.RetrieveOrUpdateObject(nil, id, "", "", "", tmfcache.LocalOrRemote)
 	if err != nil {
-		slog.Error("HandleUPDATEAuth", "id", id, slogor.Err(err))
 		return nil, errl.Errorf("retrieving %s: %w", id, err)
 	}
 	if local {

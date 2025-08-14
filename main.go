@@ -491,7 +491,6 @@ func startServices(args []string) {
 
 	// At this moment, the flags have the values either from the environment or from the command line
 	if err := rootCmd.Run(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", ffhelp.Command(rootCmd))
 
 		if errors.Is(err, ff.ErrHelp) {
 			fmt.Println("HELP is requested")

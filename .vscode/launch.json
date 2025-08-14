@@ -62,7 +62,7 @@
             "request": "launch",
             "mode": "debug",
             "program": "main.go",
-            "args": ["", "-debug"],
+            "args": ["-d"],
             "cwd": "."
         },
 
