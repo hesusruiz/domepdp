@@ -1,0 +1,22 @@
+PATCH https://tmf.dome-marketplace-sbx.org/tmf-api/party/v4/organization/urn:ngsi-ld:organization:2ed7e0ca-1b8e-4061-8dc8-b1dcf9fb812b HTTP/1.1
+content-type: application/json
+
+{
+  "tradingName": "DOME Foundation",
+  "externalReference": [
+    {
+      "externalReferenceType": "idm_id",
+      "name": "VATES-33333333S"
+    }
+  ],
+  "partyCharacteristic": [
+    {
+      "name": "website",
+      "value": "https://dome-marketplace-sbx.org"
+    },
+    {
+      "name": "country",
+      "value": "ES"
+    }
+  ]
+}

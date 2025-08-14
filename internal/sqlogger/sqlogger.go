@@ -248,6 +248,10 @@ func (h *SQLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 
+func (h *SQLogHandler) Level() *slog.LevelVar {
+	return h.opts.Level.(*slog.LevelVar)
+}
+
 func (h *SQLogHandler) Handle(c context.Context, r slog.Record) error {
 
 	// Get a byte buffer from the pool and defer returning it to the pool
@@ -584,4 +588,8 @@ func freeBuf(b *[]byte) {
 		*b = (*b)[:0]
 		bufPool.Put(b)
 	}
+}
+
+func Err(err error) slog.Attr {
+	return slog.Any("err", err)
 }

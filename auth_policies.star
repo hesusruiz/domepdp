@@ -13,8 +13,8 @@ four objects that can be used to implement the authorization policies: 'request'
     "action": one of 'LIST', 'READ', 'CREATE', 'UPDATE' or 'DELETE', an alias of the HTTP method of the request.
     "method": the HTTP method that was used in the request ('GET', 'POST', 'PUT', 'PATCH' or 'DELETE').
     "host": the host header in the request.
-    "remote_addr": the IP address of the remote machine acessing the object.
-    "path": the url path (does not include the the query parameters).
+    "remote_addr": the IP address of the remote machine accessing the object.
+    "path": the url path (does not include the query parameters).
     "query": a dictionary with all the query parameters in the url.
 
     "resource": the TMForum resource being accessed (eg., productOffering, catalog, etc.).
@@ -49,9 +49,9 @@ four objects that can be used to implement the authorization policies: 'request'
     "resource": the resource name of the TMForum object being accessed, like 'productOffering' or 'productSpecification'.
     "organizationIdentifier": the identifier of the company who owns the TMForum object,
         which is the company that created the object in the DOME Marketplace.
-    "permittedCountries" and "prohibitedCountries" which are lists of countries acording to the
+    "permittedCountries" and "prohibitedCountries" which are lists of countries according to the
         country restriction policies embedded in the TMForum object.
-    "permittedOperators" and "prohibitedOperators" which are lists of operator identities acording to the
+    "permittedOperators" and "prohibitedOperators" which are lists of operator identities according to the
         operator restriction policies embedded in the TMForum object.
 
 The policies below are an example that can be used as starting point by the policy writer.
@@ -70,7 +70,8 @@ forbidden_countries = ["RU"]
 
 # These are just examples of policies that you can use to define yours.
 # You can add and delete anything that you need for implementing your policies.
-# The only thing you can not change is the name of the function, which must be 'authorize'.
+# The only thing you can not change is the name of the function,
+# which must be 'authorize'.
 def authorize():
 
     # The 'print' function writes to the logging system 
@@ -82,36 +83,42 @@ def authorize():
 
     return False
 
-    # This rule denies access to remote users belonging to an organization in the list of forbidden countries
+    # This rule denies access to remote users belonging to an
+    # organization in the list of forbidden countries
     if input.user.country in forbidden_countries:
         print("rejected because country forbidden:", input.user.country)
         return False
 
-    # This rule denies access to remote users not explicitly included in the allowed countries list
+    # This rule denies access to remote users not explicitly included
+    # in the allowed countries list
     if input.user.country not in allowed_countries:
         print("forbidden because country not allowed:", input.user.country)
         return False
 
-    # You can take different decisions depending on the action that the user is intending to do
+    # You can take different decisions depending on the action that the
+    # user is intending to do
     if input.request.action == "UPDATE":
         return True
 
-    # This denies access to all requests that have not been rejected or accepted by the previous rules.
-    # The default is to deny access, so if you do not explicitly return True at some point,
-    # the request will be rejected.
+    # This denies access to all requests that have not been rejected or
+    #accepted by the previous rules.
+    # The default is to deny access, so if you do not explicitly return True
+    # at some point, the request will be rejected.
     return True
 
     # *********************************************************************
-    # The previous statement ('return') stops evaluation of rules beyond this point.
-    # The rules below are additional examples of what fields are available for rules.
+    # The previous statement ('return') stops evaluation of rules.
+    # The rules below are additional examples of fields available for rules.
     # They are not executed but you can copy/paste and adapt.
     # *********************************************************************
 
-    # This rule denies access if the organization of the remote user is not the same as the one owning the TMForum object
+    # This rule denies access if the organization of the remote user is not
+    # the same as the one owning the TMForum object
     if not input.user.isOwner:
         return False
 
-    # You can also access the powers of the remote user, available in the LEARCredential.
+    # You can also access the powers of the remote user,
+    # available in the LEARCredential.
     # You can use variables to facilitate writing the rules. For example:
 
     mandator = input.token.vc.credentialSubject.mandate.mandator
@@ -120,8 +127,9 @@ def authorize():
 
     remote_user_organization = mandator.organizationIdentifier
 
-    # An alternative syntax is available if you are more comfortable with it:
-    also_the_mandator = input["token"]["vc"]["credentialSubject"]["mandate"]["mandator"]
+    # An alternative syntax is available if you are more comfortable with it
+    credential_subject = input["token"]["vc"]["credentialSubject"]
+    also_the_mandator = credential_subject["mandate"]["mandator"]
     also_the_user_organization = also_the_mandator["organizationIdentifier"]
 
     # This is just in case we reach here for some reason
@@ -129,9 +137,9 @@ def authorize():
 
 
 
-###############################################################################
+#############################################################
 # Auxiliary functions
-###############################################################################
+#############################################################
 
 # Policies can be as complex as you want, and functions can help to structure them.
 # This is an example of a function that can be used to abstract some policy rules and

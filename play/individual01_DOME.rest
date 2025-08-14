@@ -1,0 +1,25 @@
+PATCH https://tmf.dome-marketplace-sbx.org/tmf-api/party/v4/individual/urn:ngsi-ld:individual:f401dfeb-23bd-428c-94be-c27e40e9d686 HTTP/1.1
+content-type: application/json
+
+{
+  "externalReference": [
+    {
+      "externalReferenceType": "idm_id",
+      "name": "did:key:zDnaee6kD3wYi98bVs5XRJBuENn77oojj7rt7xbPHxsj7YEmt"
+    }
+  ],
+  "familyName": "Jesus Ruiz",
+  "givenName": "Jesus Ruiz",
+  "relatedParty": [
+    {
+      "@schemaLocation": "https://raw.githubusercontent.com/DOME-Marketplace/dome-odrl-profile/refs/heads/main/schemas/simplified/RelatedPartyRef.schema.json",
+      "@referredType": "organization",
+      "did": "did:elsi:VATES-B60645900",
+      "href": "urn:ngsi-ld:organization:df55d895-fe24-47fc-9506-39e532279997",
+      "id": "urn:ngsi-ld:organization:df55d895-fe24-47fc-9506-39e532279997",
+      "name": "IN2, Ingeniería de la Información, S.L.",
+      "role": "orgAdmin,seller"
+    }
+  ],
+  "title": ""
+}

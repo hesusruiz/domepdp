@@ -1,0 +1,56 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+)
+
+type SeverityLevel int
+
+const (
+	DebugM SeverityLevel = iota
+	InfoM
+	WarnM
+	ErrorM
+)
+
+func (s SeverityLevel) String() string {
+	switch s {
+	case DebugM:
+		return "Debug"
+	case InfoM:
+		return "Info"
+	case WarnM:
+		return "Warn"
+	case ErrorM:
+		return "Error"
+	default:
+		return "Unknown"
+	}
+}
+
+type ValidationMessage struct {
+	Severity SeverityLevel
+	Message  string
+}
+
+type ValidationMessages []ValidationMessage
+
+func (m ValidationMessages) Add(severity SeverityLevel, message string) {
+	m = append(m, ValidationMessage{Severity: severity, Message: message})
+}
+
+func (m ValidationMessages) Addf(severity SeverityLevel, format string, args ...any) {
+	m.Add(severity, fmt.Sprintf(format, args...))
+}
+
+func (m ValidationMessages) String() string {
+	var ss strings.Builder
+	for _, v := range m {
+		ss.WriteString(v.Severity.String())
+		ss.WriteString(": ")
+		ss.WriteString(v.Message)
+		ss.WriteString("\n")
+	}
+	return ss.String()
+}

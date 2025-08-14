@@ -101,14 +101,13 @@ func addHttpRoutes(
 		mdl.ReplyTMF(w, []byte("{}"), nil)
 	})
 
-	// Generic LIST handler
-	mux.HandleFunc("GET /tmf-api/{tmfAPI}/v4/{tmfResource}",
+	// Retrieve the list of objects according to the parameters specified in the HTTP request
+	mux.HandleFunc("GET /tmf-api/{tmfAPI}/{version}/{tmfResource}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			tmfManagementSystem := r.PathValue("tmfAPI")
 			tmfResource := r.PathValue("tmfResource")
 
-			// Retrieve the list of objects according to the parameters specified in the HTTP request
 			logger.Info("GET LIST", mdl.RequestID(r), "api", tmfManagementSystem, "type", tmfResource)
 
 			// Set the proper fields in the request
@@ -128,7 +127,7 @@ func addHttpRoutes(
 			// Create the output list with the map content fields, ready for marshalling
 			var listMaps = []map[string]any{}
 			for _, v := range tmfObjectList {
-				listMaps = append(listMaps, v.ContentAsMap)
+				listMaps = append(listMaps, v.GetContentAsMap())
 			}
 
 			// We must send a randomly ordered list, to preserve fairness in the presentation of the offerings
@@ -153,8 +152,8 @@ func addHttpRoutes(
 
 		})
 
-	// Generic GET handler
-	mux.HandleFunc("GET /tmf-api/{tmfAPI}/v4/{tmfResource}/{id}",
+	// Retrieve one object given its id
+	mux.HandleFunc("GET /tmf-api/{tmfAPI}/{version}/{tmfResource}/{id}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			tmfManagementSystem := r.PathValue("tmfAPI")
@@ -185,8 +184,8 @@ func addHttpRoutes(
 
 		})
 
-	// Generic POST handler
-	mux.HandleFunc("POST /tmf-api/{tmfAPI}/v4/{tmfResource}",
+	// Create one object, according to the body of the request
+	mux.HandleFunc("POST /tmf-api/{tmfAPI}/{version}/{tmfResource}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			tmfManagementSystem := r.PathValue("tmfAPI")
@@ -196,9 +195,8 @@ func addHttpRoutes(
 
 			// Treat the HUB resource for notifications especially
 			if tmfResource == "hub" {
-				// Log the request
-				logger.Error("creation of HUB for notifications")
-				// TODO: handle the request
+				mdl.ErrorTMF(w, http.StatusBadRequest, "not supported", "creating HUB for notifications is not supported")
+				logger.Error("creating HUB for notifications is not supported")
 				return
 			}
 
@@ -226,8 +224,8 @@ func addHttpRoutes(
 
 		})
 
-	// Generic PATCH handler
-	mux.HandleFunc("PATCH /tmf-api/{tmfAPI}/v4/{tmfResource}/{id}",
+	// Update one object
+	mux.HandleFunc("PATCH /tmf-api/{tmfAPI}/{version}/{tmfResource}/{id}",
 		func(w http.ResponseWriter, r *http.Request) {
 
 			tmfManagementSystem := r.PathValue("tmfAPI")

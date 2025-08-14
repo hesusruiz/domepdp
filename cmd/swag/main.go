@@ -4,11 +4,13 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"text/template"
 
 	"github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/internal/jpath"
 	"golang.org/x/tools/imports"
 )
 
@@ -106,6 +108,11 @@ func processOneFile(filePath string, mapping map[string]string, resourceToStdPat
 		panic("basePath key not found or not a string")
 	}
 
+	description := jpath.GetString(oMap, "info.description")
+	if len(description) == 0 {
+		panic("description key not found or not a string")
+	}
+
 	basePathTrimmed := strings.TrimRight(basePath, "/")
 
 	basePathParts := strings.Split(strings.TrimLeft(basePathTrimmed, "/"), "/")
@@ -122,6 +129,8 @@ func processOneFile(filePath string, mapping map[string]string, resourceToStdPat
 	if !ok {
 		panic("paths key not found or not a map")
 	}
+
+	localResourceNames := map[string]bool{}
 
 	// Iterate over the keys in the "paths" map
 	for path := range paths {
@@ -153,6 +162,7 @@ func processOneFile(filePath string, mapping map[string]string, resourceToStdPat
 			continue
 		}
 
+		localResourceNames[resourceName] = true
 		mapping[resourceName] = managementSystem
 		// resourceToStdPath[resourceName] = "/" + apiPrefix + "/" + managementSystem + "/" + version + "/" + resourceName
 		resourceToStdPath[resourceName] = basePathTrimmed + "/" + resourceName
@@ -165,4 +175,35 @@ func processOneFile(filePath string, mapping map[string]string, resourceToStdPat
 
 		// fmt.Printf("(%s) %s -> %s\n", firstPart, lastPart, managementSystem)
 	}
+
+	// fmt.Println(description)
+	fmt.Printf("- **%s**: %s\n", managementSystem, baeManagementToDescription[managementSystem])
+
+	for resourceName := range localResourceNames {
+		fmt.Printf("  - %s\n", resourceName)
+	}
+
+	fmt.Println()
+
+}
+
+var baeManagementToDescription map[string]string = map[string]string{
+	"accountManagement":           "TMF666 - Account Management",
+	"agreementManagement":         "TMF651 - Agreement Management",
+	"customerBillManagement":      "TMF678 - Customer Bill Management",
+	"customerManagement":          "TMF629 - Customer Management",
+	"party":                       "TMF632 - Party Management",
+	"partyRoleManagement":         "TMF669 - Party Role Management",
+	"productCatalogManagement":    "TMF620 - Product Catalog Management",
+	"productInventory":            "TMF637 - Product Inventory Management",
+	"productOrderingManagement":   "TMF622 - Product Ordering Management",
+	"quoteManagement":             "TMF648 - Quote Management",
+	"resourceCatalog":             "TMF634 - Resource Catalog Management",
+	"resourceFunctionActivation":  "TMF664 - Resource Function Activation and Configuration",
+	"resourceInventoryManagement": "TMF639 - Resource Inventory Management",
+	"serviceCatalogManagement":    "TMF633 - Service Catalog Management",
+	"serviceInventory":            "TMF638 - Service Inventory Management",
+	"usageManagement":             "TMF635 - Usage Management",
+	"resourceOrderingManagement":  "TMF652 - Resource Ordering Management",
+	"serviceOrdering":             "TMF641 - Service Ordering Management",
 }

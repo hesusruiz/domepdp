@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hesusruiz/domeproxy/internal/errl"
 	"github.com/hesusruiz/domeproxy/internal/sqlogger"
 )
 
@@ -76,8 +77,11 @@ type Config struct {
 	LogLevel *slog.LevelVar
 }
 
-const DOMEOperatorDid = "did:elsi:VATES-11111111K"
-const DOMEOperatorName = "DOME Foundation"
+// TODO: These are here until the DOME foundation is created and the DOME operator did is set.
+const (
+	DOMEOperatorDid  = "did:elsi:VATES-11111111K"
+	DOMEOperatorName = "DOME Foundation"
+)
 
 type Environment int
 
@@ -85,11 +89,18 @@ const DOME_PRO Environment = 0
 const DOME_DEV2 Environment = 1
 const DOME_SBX Environment = 2
 const DOME_LCL Environment = 3
+const ISBE Environment = 4
+
+// As this PDP is designed for DOME and ISBE environments, many config data items are hardcoded.
+// This avoids many configuration errors and simplifies deployment, at the expense of some flexibility.
+// However, this flexibility is not really needed in practice, as the DOME environments are well defined and stable.
+// Minimizing errors is here much more important than the ability to configure these parameters.
 
 const PRO_dbname = "./tmf.db"
 const DEV2_dbname = "./tmf-dev2.db"
 const SBX_dbname = "./tmf-sbx.db"
 const LCL_dbname = "./tmf-lcl.db"
+const ISBE_dbname = "./tmf-isbe.db"
 
 const DefaultClonePeriod = 10 * time.Minute
 
@@ -133,6 +144,16 @@ var lclConfig = &Config{
 	ClonePeriod:       DefaultClonePeriod,
 }
 
+var isbeConfig = &Config{
+	Environment:       ISBE,
+	PolicyFileName:    "auth_policies.star",
+	BAEProxyDomain:    "tmf.mycredential.eu",
+	ExternalTMFDomain: "tmf.mycredential.eu",
+	VerifierServer:    "https://verifier.dome-marketplace-lcl.org",
+	Dbname:            ISBE_dbname,
+	ClonePeriod:       DefaultClonePeriod,
+}
+
 func DefaultConfig(where Environment, internal bool, usingBAEProxy bool) *Config {
 	var conf *Config
 
@@ -145,15 +166,17 @@ func DefaultConfig(where Environment, internal bool, usingBAEProxy bool) *Config
 		conf = sbxConfig
 	case DOME_LCL:
 		conf = lclConfig
+	case ISBE:
+		conf = isbeConfig
 	default:
-		panic("unknown DOME environment")
+		panic("unknown runtime environment")
 	}
 
 	conf.internal = internal
 	conf.usingBAEProxy = usingBAEProxy
 	conf.InitUpstreamHosts(defaultInternalUpstreamHosts)
 
-	conf.resourceToPath = NewResourceToExternalPathPrefix()
+	conf.resourceToPath = NewResourceToExternalPathPrefix(where)
 
 	return conf
 }
@@ -179,31 +202,29 @@ func SetLogger(debug bool, nocolor bool) *sqlogger.SQLogHandler {
 	return mylogHandler
 }
 
+// LoadConfig initializes and returns a Config struct based on the provided parameters.
+// It sets up logging, selects the appropriate environment, and applies configuration options.
+//
+// Parameters:
+//   - envir:        The environment to use ("pro", "dev2", "sbx", "lcl").
+//   - pdpAddress:   The address of the PDP service.
+//   - internal:     Whether to use internal settings.
+//   - usingBAEProxy: Whether to use the BAE proxy.
+//   - debug:        Enables debug logging if true.
+//   - nocolor:      Disables colored log output if true.
+//
+// Returns:
+//   - *Config: The initialized configuration struct.
+//   - error:   An error if configuration or logger setup fails.
 func LoadConfig(
 	envir string,
 	pdpAddress string,
 	internal bool,
 	usingBAEProxy bool,
 	debug bool,
-	nocolor bool,
+	mylogHandler *sqlogger.SQLogHandler,
 ) (*Config, error) {
 	var conf *Config
-
-	logLevel := new(slog.LevelVar)
-	if debug {
-		logLevel.Set(slog.LevelDebug)
-	}
-
-	mylogHandler, err := sqlogger.NewSQLogHandler(&sqlogger.Options{Level: logLevel, NoColor: nocolor})
-	if err != nil {
-		return nil, Error(err)
-	}
-
-	logger := slog.New(
-		mylogHandler,
-	)
-
-	slog.SetDefault(logger)
 
 	var environment Environment
 
@@ -220,14 +241,41 @@ func LoadConfig(
 	case "lcl":
 		environment = DOME_LCL
 		slog.Info("Using the LCL environment")
+	case "isbe":
+		environment = ISBE
+		slog.Info("Using the ISBE environment")
 	default:
 		environment = DOME_SBX
 		slog.Info("Using the default (SBX) environment")
 	}
 
 	conf = DefaultConfig(environment, internal, usingBAEProxy)
+
+	// Set the logger first, so we can log errors during configuration loading
+	var logLevel *slog.LevelVar
+	if mylogHandler == nil {
+
+		logLevel = new(slog.LevelVar)
+		if debug {
+			logLevel.Set(slog.LevelDebug)
+		}
+
+		mylogHandler, err := sqlogger.NewSQLogHandler(&sqlogger.Options{Level: logLevel})
+		if err != nil {
+			return nil, errl.Error(err)
+		}
+
+		logger := slog.New(
+			mylogHandler,
+		)
+
+		slog.SetDefault(logger)
+
+	}
+
 	conf.LogHandler = mylogHandler
 	conf.LogLevel = logLevel
+
 	conf.PDPAddress = pdpAddress
 	conf.Debug = debug
 
@@ -250,7 +298,6 @@ func (c *Config) InitUpstreamHosts(hosts map[string]string) {
 // SetUpstreamHost provides a typed method to set a host in the sync.Map
 func (c *Config) SetUpstreamHost(resourceName string, host string) {
 	c.internalUpstreamPodHosts.Store(resourceName, host)
-	return
 }
 
 // GetUpstreamHost provides a typed method for the upstream hosts map
@@ -277,11 +324,11 @@ func (c *Config) GetAllUpstreamHosts() map[string]string {
 func (c *Config) GetInternalPodHostFromId(id string) (string, error) {
 	resourceName, err := FromIdToResourceName(id)
 	if err != nil {
-		return "", Error(err)
+		return "", errl.Error(err)
 	}
 	podHost := c.GetUpstreamHost(resourceName)
 	if podHost == "" {
-		return "", Errorf("no internal pod host found for resource: %s", resourceName)
+		return "", errl.Errorf("no internal pod host found for resource: %s", resourceName)
 	}
 	return podHost, nil
 }
@@ -293,12 +340,12 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 		internalServiceDomainName := c.GetUpstreamHost(resourceName)
 		if internalServiceDomainName == "" {
-			return "", Errorf("no internal pod host found for resource: %s", resourceName)
+			return "", errl.Errorf("no internal pod host found for resource: %s", resourceName)
 		}
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
 		if !ok {
-			return "", Errorf("unknown object type: %s", resourceName)
+			return "", errl.Errorf("unknown object type: %s", resourceName)
 		}
 
 		return "https://" + internalServiceDomainName + pathPrefix, nil
@@ -312,7 +359,7 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 		// pathPrefix := defaultBAEResourceToPathPrefix[resourceName]
 		pathPrefix := GeneratedDefaultResourceToBAEPathPrefix[resourceName]
 		if pathPrefix == "" {
-			err := Errorf("unknown resource: %s", resourceName)
+			err := errl.Errorf("unknown resource: %s", resourceName)
 			slog.Error(err.Naked().Error())
 			return "", err
 		}
@@ -323,7 +370,7 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
 		if !ok {
-			return "", Errorf("unknown object type: %s", resourceName)
+			return "", errl.Errorf("unknown object type: %s", resourceName)
 		}
 
 		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
@@ -336,55 +383,55 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 // If the proxy operates inside the DOME instance, it uses the internal domain names of the pods.
 // Otherwise, it uses the DOME host configured in the config (e.g dome-marketplace.eu).
 // It returns the URL in the format "https://<domain-name>[:<port>]".
-func (c *Config) GetHostAndPathFromId(id string) (string, error) {
+// func (c *Config) GetHostAndPathFromId(id string) (string, error) {
 
-	resourceName, err := FromIdToResourceName(id)
-	if err != nil {
-		return "", Error(err)
-	}
+// 	resourceName, err := FromIdToResourceName(id)
+// 	if err != nil {
+// 		return "", errl.Error(err)
+// 	}
 
-	// Inside the DOME instance
-	if c.internal {
+// 	// Inside the DOME instance
+// 	if c.internal {
 
-		internalServiceDomainName := c.GetUpstreamHost(resourceName)
-		if internalServiceDomainName == "" {
-			return "", Errorf("no internal pod host found for resource: %s", resourceName)
-		}
+// 		internalServiceDomainName := c.GetUpstreamHost(resourceName)
+// 		if internalServiceDomainName == "" {
+// 			return "", errl.Errorf("no internal pod host found for resource: %s", resourceName)
+// 		}
 
-		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
-		if !ok {
-			return "", Errorf("unknown object type: %s", id)
-		}
+// 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(resourceName)
+// 		if !ok {
+// 			return "", errl.Errorf("unknown object type: %s", id)
+// 		}
 
-		return "https://" + internalServiceDomainName + pathPrefix, nil
+// 		return "https://" + internalServiceDomainName + pathPrefix, nil
 
-	}
+// 	}
 
-	// Outside the DOME instance
-	if c.usingBAEProxy {
+// 	// Outside the DOME instance
+// 	if c.usingBAEProxy {
 
-		// Each type of object has a different path prefix
-		pathPrefix := defaultBAEResourceToPathPrefix[resourceName]
-		if pathPrefix == "" {
-			err := Errorf("unknown object type: %s", resourceName)
-			slog.Error(err.Naked().Error())
-			return "", err
-		}
-		// We are accessing the TMForum APIs using the BAE Proxy
-		return "https://" + c.BAEProxyDomain + pathPrefix, nil
+// 		// Each type of object has a different path prefix
+// 		pathPrefix := defaultBAEResourceToPathPrefix[resourceName]
+// 		if pathPrefix == "" {
+// 			err := errl.Errorf("unknown object type: %s", resourceName)
+// 			slog.Error(err.Naked().Error())
+// 			return "", err
+// 		}
+// 		// We are accessing the TMForum APIs using the BAE Proxy
+// 		return "https://" + c.BAEProxyDomain + pathPrefix, nil
 
-	} else {
+// 	} else {
 
-		pathPrefix, ok := c.resourceToPath.GetPathPrefix(id)
-		if !ok {
-			return "", Errorf("unknown object type: %s", resourceName)
-		}
+// 		pathPrefix, ok := c.resourceToPath.GetPathPrefix(id)
+// 		if !ok {
+// 			return "", errl.Errorf("unknown object type: %s", resourceName)
+// 		}
 
-		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
+// 		return "https://" + c.ExternalTMFDomain + pathPrefix, nil
 
-	}
+// 	}
 
-}
+// }
 
 var defaultBAEResourceToPathPrefix = map[string]string{
 	"organization":          "/party/organization/",
@@ -409,16 +456,16 @@ func FromIdToResourceName(id string) (string, error) {
 	// Extract the different components
 	idParts := strings.Split(id, ":")
 	if len(idParts) < 4 {
-		return "", Errorf("invalid ID format: %s", id)
+		return "", errl.Errorf("invalid ID format: %s", id)
 	}
 
 	if idParts[0] != "urn" || idParts[1] != "ngsi-ld" {
-		return "", Errorf("invalid ID format: %s", id)
+		return "", errl.Errorf("invalid ID format: %s", id)
 	}
 
 	words := strings.Split(idParts[2], "-")
 	if len(words) == 0 || words[0] == "" {
-		return "", Errorf("invalid ID format: %s", id)
+		return "", errl.Errorf("invalid ID format: %s", id)
 	}
 
 	key := words[0]
@@ -460,61 +507,68 @@ var defaultInternalUpstreamHosts = map[string]string{
 }
 
 var defaultResourceToPathPrefix = map[string]string{
-	"agreement":                  "/tmf-api/agreementManagement/v4/agreement",
-	"agreementSpecification":     "/tmf-api/agreementManagement/v4/agreementSpecification",
-	"appliedCustomerBillingRate": "/tmf-api/customerBillManagement/v4/appliedCustomerBillingRate",
-	"billFormat":                 "/tmf-api/accountManagement/v4/billFormat",
-	"billPresentationMedia":      "/tmf-api/accountManagement/v4/billPresentationMedia",
-	"billingAccount":             "/tmf-api/accountManagement/v4/billingAccount",
-	"billingCycleSpecification":  "/tmf-api/accountManagement/v4/billingCycleSpecification",
-	"cancelProductOrder":         "/tmf-api/productOrderingManagement/v4/cancelProductOrder",
-	"catalog":                    "/tmf-api/productCatalogManagement/v4/catalog",
-	"category":                   "/tmf-api/productCatalogManagement/v4/category",
-	"customer":                   "/tmf-api/customerManagement/v4/customer",
-	"customerBill":               "/tmf-api/customerBillManagement/v4/customerBill",
-	"customerBillOnDemand":       "/tmf-api/customerBillManagement/v4/customerBillOnDemand",
-	"financialAccount":           "/tmf-api/accountManagement/v4/financialAccount",
-	"heal":                       "/tmf-api/resourceFunctionActivation/v4/heal",
-	"individual":                 "/tmf-api/party/v4/individual",
-	"migrate":                    "/tmf-api/resourceFunctionActivation/v4/migrate",
-	"monitor":                    "/tmf-api/resourceFunctionActivation/v4/monitor",
-	"organization":               "/tmf-api/party/v4/organization",
-	"partyAccount":               "/tmf-api/accountManagement/v4/partyAccount",
-	"partyRole":                  "/tmf-api/partyRoleManagement/v4/partyRole",
-	"product":                    "/tmf-api/productInventory/v4/product",
-	"productOffering":            "/tmf-api/productCatalogManagement/v4/productOffering",
-	"productOfferingPrice":       "/tmf-api/productCatalogManagement/v4/productOfferingPrice",
-	"productOrder":               "/tmf-api/productOrderingManagement/v4/productOrder",
-	"productSpecification":       "/tmf-api/productCatalogManagement/v4/productSpecification",
-	"quote":                      "/tmf-api/quoteManagement/v4/quote",
-	"resource":                   "/tmf-api/resourceInventoryManagement/v4/resource",
-	"resourceCandidate":          "/tmf-api/resourceCatalog/v4/resourceCandidate",
-	"resourceCatalog":            "/tmf-api/resourceCatalog/v4/resourceCatalog",
-	"resourceCategory":           "/tmf-api/resourceCatalog/v4/resourceCategory",
-	"resourceFunction":           "/tmf-api/resourceFunctionActivation/v4/resourceFunction",
-	"resourceSpecification":      "/tmf-api/resourceCatalog/v4/resourceSpecification",
-	"scale":                      "/tmf-api/resourceFunctionActivation/v4/scale",
-	"service":                    "/tmf-api/serviceInventory/v4/service",
-	"serviceCandidate":           "/tmf-api/serviceCatalogManagement/v4/serviceCandidate",
-	"serviceCatalog":             "/tmf-api/serviceCatalogManagement/v4/serviceCatalog",
-	"serviceCategory":            "/tmf-api/serviceCatalogManagement/v4/serviceCategory",
-	"serviceSpecification":       "/tmf-api/serviceCatalogManagement/v4/serviceSpecification",
-	"settlementAccount":          "/tmf-api/accountManagement/v4/settlementAccount",
-	"usage":                      "/tmf-api/usageManagement/v4/usage",
-	"usageSpecification":         "/tmf-api/usageManagement/v4/usageSpecification",
+	"agreement":                  "/tmf-api/agreementManagement",
+	"agreementSpecification":     "/tmf-api/agreementManagement",
+	"appliedCustomerBillingRate": "/tmf-api/customerBillManagement",
+	"billFormat":                 "/tmf-api/accountManagement",
+	"billPresentationMedia":      "/tmf-api/accountManagement",
+	"billingAccount":             "/tmf-api/accountManagement",
+	"billingCycleSpecification":  "/tmf-api/accountManagement",
+	"cancelProductOrder":         "/tmf-api/productOrderingManagement",
+	"catalog":                    "/tmf-api/productCatalogManagement",
+	"category":                   "/tmf-api/productCatalogManagement",
+	"customer":                   "/tmf-api/customerManagement",
+	"customerBill":               "/tmf-api/customerBillManagement",
+	"customerBillOnDemand":       "/tmf-api/customerBillManagement",
+	"financialAccount":           "/tmf-api/accountManagement",
+	"heal":                       "/tmf-api/resourceFunctionActivation",
+	"individual":                 "/tmf-api/party",
+	"migrate":                    "/tmf-api/resourceFunctionActivation",
+	"monitor":                    "/tmf-api/resourceFunctionActivation",
+	"organization":               "/tmf-api/party",
+	"partyAccount":               "/tmf-api/accountManagement",
+	"partyRole":                  "/tmf-api/partyRoleManagement",
+	"product":                    "/tmf-api/productInventory",
+	"productOffering":            "/tmf-api/productCatalogManagement",
+	"productOfferingPrice":       "/tmf-api/productCatalogManagement",
+	"productOrder":               "/tmf-api/productOrderingManagement",
+	"productSpecification":       "/tmf-api/productCatalogManagement",
+	"quote":                      "/tmf-api/quoteManagement",
+	"resource":                   "/tmf-api/resourceInventoryManagement",
+	"resourceCandidate":          "/tmf-api/resourceCatalog",
+	"resourceCatalog":            "/tmf-api/resourceCatalog",
+	"resourceCategory":           "/tmf-api/resourceCatalog",
+	"resourceFunction":           "/tmf-api/resourceFunctionActivation",
+	"resourceSpecification":      "/tmf-api/resourceCatalog",
+	"scale":                      "/tmf-api/resourceFunctionActivation",
+	"service":                    "/tmf-api/serviceInventory",
+	"serviceCandidate":           "/tmf-api/serviceCatalogManagement",
+	"serviceCatalog":             "/tmf-api/serviceCatalogManagement",
+	"serviceCategory":            "/tmf-api/serviceCatalogManagement",
+	"serviceSpecification":       "/tmf-api/serviceCatalogManagement",
+	"settlementAccount":          "/tmf-api/accountManagement",
+	"usage":                      "/tmf-api/usageManagement",
+	"usageSpecification":         "/tmf-api/usageManagement",
 }
 
 // ResourceToExternalPathPrefix is a thread-safe structure that maps TMF resources to their external path prefixes.
 // We use a sync.Map because of very frequent reads and seldom writes, so it is more efficient than a regular map with a mutex.
 type ResourceToExternalPathPrefix struct {
 	externalResourceMap sync.Map
+	apiVersion          string // The API version for the TMF APIs, e.g. "v4".
 }
 
-func NewResourceToExternalPathPrefix() *ResourceToExternalPathPrefix {
+func NewResourceToExternalPathPrefix(environment Environment) *ResourceToExternalPathPrefix {
 	r := &ResourceToExternalPathPrefix{}
+	if environment == ISBE {
+		r.apiVersion = "v5" // ISBE uses v5 of the TMF APIs
+	} else {
+		r.apiVersion = "v4"
+	}
 
 	for resource, pathPrefix := range defaultResourceToPathPrefix {
-		r.externalResourceMap.Store(resource, pathPrefix)
+		fullPathPrefix := pathPrefix + "/" + r.apiVersion + "/" + resource
+		r.externalResourceMap.Store(resource, fullPathPrefix)
 	}
 
 	return r
@@ -548,7 +602,7 @@ func (r *ResourceToExternalPathPrefix) GetAllPathPrefixes() map[string]string {
 	// Iterate over the resourceMap and collect all resource-pathPrefix pairs
 	// Note: this is a simple iteration, not thread-safe, but it is expected to be called
 	// in a context where no other goroutine is modifying the map.
-	// This is ok, because only the administator ca ndo this operation.
+	// This is ok, because only the administator can do this operation.
 	r.externalResourceMap.Range(func(key, value any) bool {
 		if resource, ok := key.(string); ok {
 			if pathPrefix, ok := value.(string); ok {
@@ -582,15 +636,20 @@ const ResourceSpecification = "resourceSpecification"
 const Category = "category"
 const Catalog = "catalog"
 const Organization = "organization"
+const Individual = "individual"
 
 var RootBAEObjects = []string{
-	"productOffering",
 	"organization",
+	"productOffering",
+	"productSpecification",
+	"productOfferingPrice",
 	"individual",
 	"category",
 	"catalog",
-	"productSpecification",
-	"productOfferingPrice",
+	"serviceSpecification",
+	"resourceSpecification",
+	"productOrder",
+	"product",
 }
 
-const schemaLocationRelatedParty = "https://raw.githubusercontent.com/DOME-Marketplace/dome-odrl-profile/refs/heads/main/schemas/simplified/RelatedPartyRef.schema.json"
+const SchemaLocationRelatedParty = "https://raw.githubusercontent.com/DOME-Marketplace/dome-odrl-profile/refs/heads/main/schemas/simplified/RelatedPartyRef.schema.json"

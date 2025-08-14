@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/internal/errl"
 	"github.com/hesusruiz/domeproxy/internal/run"
 	"github.com/hesusruiz/domeproxy/mitm"
 	"github.com/hesusruiz/domeproxy/tmfcache"
@@ -50,7 +51,7 @@ func startServices(args []string) {
 	nocolor := rootFlags.Bool('n', "nocolor", "disable color output for the logs to stdout")
 	internal := rootFlags.Bool('i', "internal", "true if must use internal upstream hosts")
 	usingBAEProxy := rootFlags.BoolDefault('b', "bae", false, "use the BAE Proxy for external access to TMForum")
-	domeenvir := rootFlags.StringEnum('e', "env", "runtime environment [lcl, sbx, dev2 or pro]", "sbx", "lcl", "dev2", "pro")
+	domeenvir := rootFlags.StringEnum('e', "env", "runtime environment [lcl, sbx, dev2 or pro]", "isbe", "sbx", "lcl", "dev2", "pro")
 
 	// Man-In-The-Middle proxy flags
 	enableMITM := rootFlags.BoolLong("mitmenable", "enable the Man-In-The-Middle proxy server")
@@ -67,34 +68,32 @@ func startServices(args []string) {
 
 			fmt.Println("running MAIN domepdp command")
 			if len(args) > 0 {
-				return config.Errorf("invalid subcommand: '%s'", args[0])
+				return errl.Errorf("invalid subcommand: '%s'", args[0])
 			}
 
-			config.SetLogger(*debug, *nocolor)
+			logger := config.SetLogger(*debug, *nocolor)
+			defer logger.Close()
 
 			// concurrentGroup collects actors (functions) and runs them concurrently. When one actor (function) returns,
 			// all actors are interrupted by calling to their stop function for a graceful shutdown.
 			var concurrentGroup run.Group
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
-				panic(err)
+				return errl.Error(err)
 			}
-
-			// Make sure to close the database associated to the log
-			defer tmfConfig.LogHandler.Close()
 
 			// Configure the PDP server to receive/authorize intercepted requests
 			tmfRun, tmfStop, err := tmfproxy.TMFServerHandler(tmfConfig)
 			if err != nil {
-				slog.Error("error starting TMF server", slogor.Err(err))
-				os.Exit(1)
+				return errl.Errorf("error starting TMF server: %w", err)
 			}
 
 			// Add to the monitoring group
 			concurrentGroup.Add(tmfRun, tmfStop)
 
-			startDebugServer(tmfConfig.LogLevel)
+			// Start a debug server to manage some internal settings
+			startDebugServer(logger.Level())
 
 			// The management of the interrupt signal (ctrl-c)
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -106,9 +105,11 @@ func startServices(args []string) {
 				stop()
 			})
 
+			// If the MITM (Man-In-The-Middle) proxy is enabled, start it
+			// It will intercept the requests to the TMF APIs and allow to inspect them
+			// This must be used only for debugging purposes, as it will not work in production environments
 			if *enableMITM {
 
-				// Start a MITM server to intercept the requests to the TMF APIs
 				mitmConfig := mitm.NewConfig(
 					*domeenvir,
 					*mitmAddress,
@@ -120,19 +121,18 @@ func startServices(args []string) {
 
 				mitmRun, mitmStop, err := mitm.MITMServerHandler(mitmConfig)
 				if err != nil {
-					slog.Error("error starting MITM server", slogor.Err(err))
-					os.Exit(1)
+					return errl.Errorf("error starting MITM server: %w", err)
 				}
 				concurrentGroup.Add(mitmRun, mitmStop)
 
 			}
 
-			// Start all actors and wait for interrupt signal to gracefully shut down the server.
+			// Everything is ready, start all actors and wait for interrupt signal to gracefully shut down the server.
 			err = concurrentGroup.Run()
 			if err != nil {
-				slog.Error("error running concurrent group", "err", err)
+				return errl.Errorf("error running concurrent group: %w", err)
 			}
-			slog.Info("shutting down gracefully")
+			slog.Info("server stopped, shutting down gracefully")
 
 			return nil
 		},
@@ -157,6 +157,13 @@ func startServices(args []string) {
 
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
+			if *verbose {
+				tmfcache.Verbose = true
+			}
+
+			if len(args) > 0 {
+				return errl.Errorf("invalid subcommand: '%s'", args[0])
+			}
 
 			if *delete {
 				slog.Info("deleting database")
@@ -168,7 +175,7 @@ func startServices(args []string) {
 				slog.Info("synchronizing ALL resources")
 			}
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -190,9 +197,27 @@ func startServices(args []string) {
 
 			tmf.Dump = false
 
+			tmf.MustFixInBackend = tmfcache.FixHigh
+
 			visitedObjects := make(map[string]bool)
 			if len(*resources) > 0 {
-				_, visitedObjects, err = tmf.CloneRemoteResources(*resources)
+
+				if strings.HasPrefix((*resources)[0], "urn:") {
+					object := (*resources)[0]
+
+					tmf.Dump = false
+
+					_, err = tmf.CloneRemoteObject(nil, object, visitedObjects)
+					if err != nil {
+						slog.Error("error calling CloneRemoteObject", slogor.Err(err))
+						os.Exit(1)
+					}
+
+				} else {
+
+					_, visitedObjects, err = tmf.CloneRemoteResources(*resources)
+
+				}
 
 			} else {
 				_, visitedObjects, err = tmf.CloneAllRemoteBAEResources()
@@ -232,11 +257,13 @@ func startServices(args []string) {
 	// get command, to retrieve one or more individual objects
 	// *************************************************************************************************
 
+	getFlags := ff.NewFlagSet("get")
+
 	getCmd := &ff.Command{
 		Name:      "get",
 		Usage:     "domepdp get TMF_ID",
 		ShortHelp: "retrieve a single object by its ID",
-		Flags:     ff.NewFlagSet("get").SetParent(rootFlags),
+		Flags:     getFlags.SetParent(rootFlags),
 		Exec: func(ctx context.Context, args []string) error {
 			if *verbose {
 				fmt.Fprintf(os.Stderr, "get: nargs=%d\n", len(args))
@@ -245,7 +272,7 @@ func startServices(args []string) {
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("error loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -277,7 +304,7 @@ func startServices(args []string) {
 					continue
 				}
 				if !local {
-					fmt.Println("object retrieved remotely not found:", arg)
+					fmt.Println("object retrieved remotely:", arg)
 				} else {
 					fmt.Println("object retrieved locally:", arg)
 				}
@@ -298,11 +325,14 @@ func startServices(args []string) {
 	// fix command, to try to fix an object or colletion of objects
 	// *************************************************************************************************
 
+	fixFlags := ff.NewFlagSet("fix")
+	var deleteFix = fixFlags.BoolLong("delete", "delete the database before performing a new synchronization")
+
 	fixCmd := &ff.Command{
 		Name:      "fix",
 		Usage:     "domepdp fix RESOURCE [RESOURCE...]",
 		ShortHelp: "try to fix a single object by its ID",
-		Flags:     ff.NewFlagSet("fix").SetParent(rootFlags),
+		Flags:     fixFlags.SetParent(rootFlags),
 		Exec: func(ctx context.Context, resources []string) error {
 			if *verbose {
 				fmt.Fprintf(os.Stderr, "fix: nargs=%d\n", len(resources))
@@ -315,7 +345,7 @@ func startServices(args []string) {
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, *nocolor)
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("error loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -324,17 +354,19 @@ func startServices(args []string) {
 			// Make sure to close the database associated to the log
 			defer tmfConfig.LogHandler.Close()
 
-			tmf, err := tmfcache.NewTMFCache(tmfConfig, false)
+			cache, err := tmfcache.NewTMFCache(tmfConfig, *deleteFix)
 			if err != nil {
 				log.Fatal(err)
 				fmt.Println("error calling NewTMFCache", err.Error())
 				os.Exit(1)
 			}
-			defer tmf.Close()
+			defer cache.Close()
 
 			if *fressness > 0 {
-				tmf.Maxfreshness = *fressness
+				cache.Maxfreshness = *fressness
 			}
+
+			cache.MustFixInBackend = tmfcache.FixNone
 
 			for _, resource := range resources {
 				if len(resource) == 0 {
@@ -343,7 +375,7 @@ func startServices(args []string) {
 
 				visitedObjects := make(map[string]bool)
 
-				oList, err := tmf.CloneRemoteResource(resource, visitedObjects)
+				oList, err := cache.CloneRemoteResource(resource, visitedObjects)
 				if err != nil {
 					fmt.Println("error:", err.Error())
 					continue
@@ -360,8 +392,8 @@ func startServices(args []string) {
 						panic(err)
 					}
 
-					id, _ := org.GetIDMID()
-					org.SetOrganizationIdentification(id)
+					// id, _ := org.GetIDMID()
+					// org.SetOrganizationIdentification(id)
 
 					fmt.Println(org)
 				}
@@ -378,6 +410,70 @@ func startServices(args []string) {
 		},
 	}
 	rootCmd.Subcommands = append(rootCmd.Subcommands, fixCmd)
+
+	// *************************************************************************************************
+	// dump command, to retrieve one or more individual objects
+	// *************************************************************************************************
+
+	dumpFlags := ff.NewFlagSet("dump")
+
+	dumpCmd := &ff.Command{
+		Name:      "dump",
+		Usage:     "domepdp dump TMF_ID",
+		ShortHelp: "retrieve a local object by its ID and display it",
+		Flags:     dumpFlags.SetParent(rootFlags),
+		Exec: func(ctx context.Context, args []string) error {
+			if *verbose {
+				fmt.Fprintf(os.Stderr, "dump: nargs=%d\n", len(args))
+			}
+
+			logger := config.SetLogger(*debug, *nocolor)
+			defer logger.Close()
+
+			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			if err != nil {
+				slog.Error("error loading configuration", slogor.Err(err))
+				os.Exit(1)
+			}
+
+			// Make sure to close the database associated to the log
+			defer tmfConfig.LogHandler.Close()
+
+			tmf, err := tmfcache.NewTMFCache(tmfConfig, false)
+			if err != nil {
+				log.Fatal(err)
+				fmt.Println("error calling NewTMFCache", err.Error())
+				os.Exit(-1)
+			}
+			defer tmf.Close()
+
+			if *fressness > 0 {
+				tmf.Maxfreshness = *fressness
+			}
+
+			for _, arg := range args {
+				if len(arg) == 0 {
+					continue
+				}
+
+				visitedObjects := make(map[string]bool)
+				visitedStack := tmfcache.Stack{}
+				tmf.Dump = true
+
+				_, visitedStack, err := tmf.LocalProductOfferings(nil, arg, visitedObjects, visitedStack)
+				// _, visitedStack, err := tmf.VisitRemoteObject(nil, arg, visitedObjects, visitedStack)
+				if err != nil {
+					return err
+				}
+				// for _, oo := range visitedStack {
+				// 	fmt.Println(oo.OrigHref, "-->", oo.DestHref)
+				// }
+
+			}
+			return nil
+		},
+	}
+	rootCmd.Subcommands = append(rootCmd.Subcommands, dumpCmd)
 
 	// Parse the arguments and flags and select the proper command to execute
 	if err := rootCmd.Parse(args, ff.WithEnvVarPrefix("PDP")); err != nil {

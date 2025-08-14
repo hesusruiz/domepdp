@@ -5,7 +5,10 @@ import (
 	"strings"
 
 	"github.com/goccy/go-json"
+	"github.com/hesusruiz/domeproxy/internal/errl"
 )
+
+var _ TMFObject = (*TMFOrganization)(nil)
 
 type TMFOrganization struct {
 	TMFGeneralObject
@@ -16,6 +19,17 @@ type OrganizationIdentification struct {
 	IdentificationId   string `json:"identificationId,omitempty"`
 	IdentificationType string `json:"identificationType,omitempty"`
 	IssuingAuthority   string `json:"issuingAuthority,omitempty"`
+}
+
+func (po *TMFOrganization) Validate() errl.ValidationMessages {
+
+	// Validate the embedded general object
+	po.TMFGeneralObject.Validate()
+
+	// Ad our specific validation messages
+	po.Messages.Add(errl.WarnM, "not implemented")
+
+	return po.Messages
 }
 
 const eIDASAuthority = "eIDAS"
@@ -66,7 +80,7 @@ func (o *TMFOrganization) MarshalJSON() ([]byte, error) {
 
 }
 
-func (o *TMFOrganization) GetIDMID() (organizationIdentifier string, organizationName string) {
+func (o *TMFOrganization) GetIDMID() (organizationIdentifier string, organizationName string, err error) {
 	// if o == nil {
 	// 	return "", ""
 	// }
@@ -75,7 +89,7 @@ func (o *TMFOrganization) GetIDMID() (organizationIdentifier string, organizatio
 	ownerReferences, ok := o.ContentAsMap["externalReference"].([]any)
 	if !ok {
 		slog.Error("getRelatedPartyOwner: externalReference is nil or not a list", "resource", o.ID)
-		return "", ""
+		return "", "", errl.Errorf("resource is not an organization")
 	}
 
 	// The externalReference array must contain an entry with a map named "externalReferenceType"
@@ -105,10 +119,10 @@ func (o *TMFOrganization) GetIDMID() (organizationIdentifier string, organizatio
 
 			organization, _ := o.ContentAsMap["tradingName"].(string)
 
-			return organizationIdentifier, organization
+			return organizationIdentifier, organization, nil
 		}
 	}
 
-	return "", ""
+	return "", "", errl.Error(ErrorNotFound)
 
 }

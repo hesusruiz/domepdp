@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/internal/errl"
 	"github.com/hesusruiz/domeproxy/internal/middleware"
 	"github.com/hesusruiz/domeproxy/pdp"
 	"github.com/hesusruiz/domeproxy/tmfcache"
@@ -24,7 +25,7 @@ import (
 //  1. As a combination of PIP+PDP, intercepting all requests to downstream TMF APIs,
 //     evaluating the policies before the requests arrive to the actual implementation of the APIs.
 //  2. As a 'pure' PDP, acting as an authorization server for some upstream PIP like NGINX. In this
-//     mode, requests are intercepted by the PIP which asks the PDP for an authorization decision.
+//     mode, requests are intercepted by the PIP which asks the PDP (this program) for an authorization decision.
 func TMFServerHandler(
 	cfg *config.Config,
 ) (execute func() error, interrupt func(error), err error) {
@@ -32,7 +33,7 @@ func TMFServerHandler(
 	// Set the default configuration, depending on the environment (production, development, ...)
 	tmfDb, err := tmfcache.NewTMFCache(cfg, false)
 	if err != nil {
-		return nil, nil, config.Error(err)
+		return nil, nil, errl.Error(err)
 	}
 
 	mux := http.NewServeMux()
@@ -40,7 +41,7 @@ func TMFServerHandler(
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
 	rulesEngine, err := pdp.NewPDP(cfg, nil, nil)
 	if err != nil {
-		return nil, nil, config.Error(err)
+		return nil, nil, errl.Error(err)
 	}
 
 	addAdminRoutes(cfg, mux, tmfDb, rulesEngine)
@@ -97,7 +98,7 @@ func TMFServerHandler(
 		}()
 
 		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			return config.Error(err)
+			return errl.Error(err)
 		}
 		return nil
 
