@@ -326,23 +326,23 @@ func (c *Config) GetAllUpstreamHosts() map[string]string {
 	return hosts
 }
 
-// GetInternalPodHostFromId retrieves the upstream host for a given ID, depending on the resource type of the ID,
-// when the proxy operates inside the DOME instance or not.
-func (c *Config) GetInternalPodHostFromId(id string) (string, error) {
-	resourceName, err := FromIdToResourceName(id)
-	if err != nil {
-		return "", errl.Error(err)
-	}
-	podHost := c.GetUpstreamHost(resourceName)
-	if podHost == "" {
-		return "", errl.Errorf("no internal pod host found for resource: %s", resourceName)
-	}
-	return podHost, nil
-}
+// // GetInternalPodHostFromId retrieves the upstream host for a given ID, depending on the resource type of the ID,
+// // when the proxy operates inside the DOME instance or not.
+// func (c *Config) GetInternalPodHostFromId(id string) (string, error) {
+// 	resourceName, err := FromIdToResourceName(id)
+// 	if err != nil {
+// 		return "", errl.Error(err)
+// 	}
+// 	podHost := c.GetUpstreamHost(resourceName)
+// 	if podHost == "" {
+// 		return "", errl.Errorf("no internal pod host found for resource: %s", resourceName)
+// 	}
+// 	return podHost, nil
+// }
 
 func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, error) {
 
-	// Inside the DOME instance
+	// If we are running inside the DOME instance
 	if c.internal {
 
 		internalServiceDomainName := c.GetUpstreamHost(resourceName)
@@ -359,7 +359,7 @@ func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, er
 
 	}
 
-	// We are outside the DOME instance, but there are two cases:
+	// If we are outside the DOME instance, there are two cases:
 	// 1. We are using the BAE Proxy (unsupported, only for tests).
 	// 2. We are using a "real" exposed TMForum API.
 	if c.usingBAEProxy {
@@ -498,6 +498,25 @@ func FromIdToResourceName(id string) (string, error) {
 
 var defaultInternalUpstreamHosts = map[string]string{
 	"productCatalogManagement":    "tm-forum-api-product-catalog:8080",
+	"party":                       "tm-forum-api-party-catalog:8080",
+	"customerBillManagement":      "tm-forum-api-customer-bill-management:8080",
+	"customerManagement":          "tm-forum-api-customer-management:8080",
+	"productInventory":            "tm-forum-api-product-inventory:8080",
+	"productOrderingManagement":   "tm-forum-api-product-ordering-management:8080",
+	"resourceCatalog":             "tm-forum-api-resource-catalog:8080",
+	"resourceFunctionActivation":  "tm-forum-api-resource-function-activation:8080",
+	"resourceInventoryManagement": "tm-forum-api-resource-inventory-management:8080",
+	"serviceCatalogManagement":    "tm-forum-api-service-catalog:8080",
+	"serviceInventory":            "tm-forum-api-service-inventory:8080",
+	"accountManagement":           "tm-forum-api-account-management:8080",
+	"agreementManagement":         "tm-forum-api-agreement-management:8080",
+	"partyRoleManagement":         "tm-forum-api-party-role-management:8080",
+	"usageManagement":             "tm-forum-api-usage-management:8080",
+	"quote":                       "tm-forum-api-quote:8080",
+}
+
+var isbeTestingUpstreamHosts = map[string]string{
+	"productCatalogManagement":    "http://localhost:8620/tmf-api/productCatalogManagement:8080",
 	"party":                       "tm-forum-api-party-catalog:8080",
 	"customerBillManagement":      "tm-forum-api-customer-bill-management:8080",
 	"customerManagement":          "tm-forum-api-customer-management:8080",
