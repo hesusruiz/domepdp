@@ -181,9 +181,6 @@ func startServices(args []string) {
 				os.Exit(1)
 			}
 
-			// Make sure to close the database associated to the log
-			defer tmfConfig.LogHandler.Close()
-
 			tmf, err := tmfcache.NewTMFCache(tmfConfig, *delete)
 			if err != nil {
 				slog.Error("error calling NewTMFCache", slogor.Err(err))

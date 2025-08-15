@@ -525,6 +525,7 @@ var defaultResourceToPathPrefix = map[string]string{
 	"billingCycleSpecification":  "/tmf-api/accountManagement",
 	"cancelProductOrder":         "/tmf-api/productOrderingManagement",
 	"catalog":                    "/tmf-api/productCatalogManagement",
+	"productCatalog":             "/tmf-api/productCatalogManagement",
 	"category":                   "/tmf-api/productCatalogManagement",
 	"customer":                   "/tmf-api/customerManagement",
 	"customerBill":               "/tmf-api/customerBillManagement",

@@ -47,7 +47,7 @@ func TMFServerHandler(
 	addAdminRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Add the TMForum API routes
-	addHttpRoutes(cfg, mux, tmfDb, rulesEngine)
+	addHttpRoutesISBE(cfg, mux, tmfDb, rulesEngine)
 
 	// Enable CORS with permissive options.
 	handler := cors.AllowAll().Handler(mux)
@@ -82,7 +82,7 @@ func TMFServerHandler(
 
 			tmfDb.CloneRemoteProductOfferings()
 
-			_, _, err = tmfDb.CloneRemoteResources([]string{"category", "catalog"})
+			_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
 
 			elapsed := time.Since(start)
 			slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
@@ -92,7 +92,7 @@ func TMFServerHandler(
 				slog.Info("started cloning", "time", next.String())
 
 				tmfDb.CloneRemoteProductOfferings()
-				_, _, err = tmfDb.CloneRemoteResources([]string{"category", "catalog"})
+				_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
 
 				elapsed := time.Since(next)
 				slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
