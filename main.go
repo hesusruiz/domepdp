@@ -52,6 +52,7 @@ func startServices(args []string) {
 	internal := rootFlags.Bool('i', "internal", "true if must use internal upstream hosts")
 	usingBAEProxy := rootFlags.BoolDefault('b', "bae", false, "use the BAE Proxy for external access to TMForum")
 	domeenvir := rootFlags.StringEnum('e', "env", "runtime environment [lcl, sbx, dev2 or pro]", "isbe", "sbx", "lcl", "dev2", "pro")
+	backgroundSync := rootFlags.BoolDefault('s', "backgroudsync", false, "enable background synchronization of the TMForum resources")
 
 	// Man-In-The-Middle proxy flags
 	enableMITM := rootFlags.BoolLong("mitmenable", "enable the Man-In-The-Middle proxy server")
@@ -82,6 +83,11 @@ func startServices(args []string) {
 			if err != nil {
 				return errl.Error(err)
 			}
+
+			tmfConfig.BackgroudSync = *backgroundSync
+
+			// For testing
+			tmfConfig.FakeClaims = true
 
 			// Configure the PDP server to receive/authorize intercepted requests
 			tmfRun, tmfStop, err := tmfproxy.TMFServerHandler(tmfConfig)
@@ -199,22 +205,7 @@ func startServices(args []string) {
 			visitedObjects := make(map[string]bool)
 			if len(*resources) > 0 {
 
-				if strings.HasPrefix((*resources)[0], "urn:") {
-					object := (*resources)[0]
-
-					tmf.Dump = false
-
-					_, err = tmf.CloneRemoteObject(nil, object, visitedObjects)
-					if err != nil {
-						slog.Error("error calling CloneRemoteObject", slogor.Err(err))
-						os.Exit(1)
-					}
-
-				} else {
-
-					_, visitedObjects, err = tmf.CloneRemoteResources(*resources)
-
-				}
+				_, visitedObjects, err = tmf.CloneRemoteResources(*resources)
 
 			} else {
 				_, visitedObjects, err = tmf.CloneAllRemoteBAEResources()
@@ -256,6 +247,8 @@ func startServices(args []string) {
 
 	getFlags := ff.NewFlagSet("get")
 
+	var resource = getFlags.String('r', "resource", "productOffering", "TMForum resource type to synchronize. Can be repeated to specify more than one")
+
 	getCmd := &ff.Command{
 		Name:      "get",
 		Usage:     "domepdp get TMF_ID",
@@ -295,7 +288,7 @@ func startServices(args []string) {
 					continue
 				}
 
-				po, local, err := tmf.RetrieveOrUpdateObject(nil, arg, "", "", "", tmfcache.LocalOrRemote)
+				po, local, err := tmf.RetrieveOrUpdateObject(nil, arg, *resource, "", "", "", tmfcache.LocalOrRemote)
 				if err != nil {
 					fmt.Println("error:", err.Error())
 					continue
@@ -383,8 +376,7 @@ func startServices(args []string) {
 				fmt.Println("############################################")
 				for _, pepe := range oList {
 
-					org := &tmfcache.TMFOrganization{}
-					err := org.FromMap(pepe.GetContentAsMap())
+					org, err := tmfcache.TMFObjectFromMap(pepe.GetContentAsMap())
 					if err != nil {
 						panic(err)
 					}

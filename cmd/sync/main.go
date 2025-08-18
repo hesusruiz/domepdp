@@ -23,6 +23,7 @@ func main() {
 
 	var refreshTime = flag.Int("refresh", 3600, "refresh time in seconds, to update all objects older than this time")
 	var dump = flag.String("dump", "", "display an object by identifier")
+	var resource = flag.String("resource", "", "resource type, one of productOffering, catalog, or organization")
 	var delete = flag.Bool("delete", false, "delete the database before performing a new synchronization")
 	var envir = flag.String("env", "sbx", "environment, one of lcl, sbx, dev2 or pro.")
 
@@ -79,7 +80,7 @@ func main() {
 	}
 
 	if len(*dump) > 0 {
-		po, _, err := tmf.LocalRetrieveTMFObject(nil, *dump, "")
+		po, _, err := tmf.LocalRetrieveTMFObject(nil, *dump, *resource, "")
 		if err != nil {
 			panic(err)
 		}

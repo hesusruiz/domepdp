@@ -36,6 +36,8 @@ type Config struct {
 	// Debug mode, more logs and less caching
 	Debug bool
 
+	FakeClaims bool
+
 	// internalUpstreamPodHosts is a map of resource names to their internal pod hostnames.
 	// It is used to access the TMForum APIs from inside the DOME instance.
 	// The keys are the resource names (e.g. "productCatalogManagement") and the values are
@@ -50,6 +52,8 @@ type Config struct {
 	fixMode bool
 
 	resourceToPath *ResourceToExternalPathPrefix
+
+	BackgroudSync bool
 
 	// BAEProxyDomain is the host of the DOME instance.
 	// It is used to access the TMForum APIs from outside the DOME instance.
@@ -340,7 +344,23 @@ func (c *Config) GetAllUpstreamHosts() map[string]string {
 // 	return podHost, nil
 // }
 
-func (c *Config) GetHostAndPathFromResourcename(resourceName string) (string, error) {
+func (c *Config) UpstreamHostAndPathFromResource(resourceName string) (string, error) {
+
+	if c.Environment == ISBE {
+		managementSystem := GeneratedISBEResourceToManagement[resourceName]
+		if managementSystem == "" {
+			return "", errl.Errorf("no management system found for resource: %s", resourceName)
+		}
+		upstreamHost := GeneratedISBEManagementToUpstream[managementSystem]
+		if upstreamHost == "" {
+			return "", errl.Errorf("no upstream host found for resource: %s", resourceName)
+		}
+		pathPrefix := GeneratedISBEResourceToPathPrefix[resourceName]
+		if pathPrefix == "" {
+			return "", errl.Errorf("unknown object type: %s", resourceName)
+		}
+		return upstreamHost + pathPrefix, nil
+	}
 
 	// If we are running inside the DOME instance
 	if c.internal {

@@ -73,32 +73,37 @@ func TMFServerHandler(
 		// Start a cloning process immediately
 		slog.Info("Starting PDP and TMForum API server", "addr", cfg.PDPAddress)
 
-		// Start a backgroud process to clone the database
-		// We make an initial cloning and then repeat every ClonePeriod (10 minutes by default)
-		go func() {
+		if cfg.BackgroudSync {
+			slog.Info("Background synchronization is enabled, cloning remote resources periodically")
 
-			start := time.Now()
-			slog.Info("started cloning", "time", start.String())
+			// Start a backgroud process to clone the database
+			// We make an initial cloning and then repeat every ClonePeriod (10 minutes by default)
+			go func() {
 
-			tmfDb.CloneRemoteProductOfferings()
-
-			_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
-
-			elapsed := time.Since(start)
-			slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
-
-			c := time.Tick(cfg.ClonePeriod)
-			for next := range c {
-				slog.Info("started cloning", "time", next.String())
+				start := time.Now()
+				slog.Info("started cloning", "time", start.String())
 
 				tmfDb.CloneRemoteProductOfferings()
+
 				_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
 
-				elapsed := time.Since(next)
+				elapsed := time.Since(start)
 				slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
-			}
 
-		}()
+				c := time.Tick(cfg.ClonePeriod)
+				for next := range c {
+					slog.Info("started cloning", "time", next.String())
+
+					tmfDb.CloneRemoteProductOfferings()
+					_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
+
+					elapsed := time.Since(next)
+					slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
+				}
+
+			}()
+
+		}
 
 		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			return errl.Error(err)

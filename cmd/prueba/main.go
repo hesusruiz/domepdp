@@ -18,9 +18,7 @@ func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	var o *tmfcache.TMFGeneralObject
-
-	err := o.FromMap(
+	_, err := tmfcache.TMFObjectFromMap(
 		map[string]any{
 			"ID": "urn:ngsi-ld:ProductOffering",
 		},

@@ -1,3 +1,36 @@
+// Package tmfcache provides functionality for caching TMForum (TMF) objects in a local SQLite database.
+//
+// It defines the TMFObject interface, a generic TMFGeneralObject implementation, and related
+// functions for creating, validating, storing, and retrieving TMF objects. The package also
+// includes utilities for managing a SQLite database used as a persistent cache, including
+// schema definition, table creation, and data access methods.
+//
+// The primary goal is to provide a mechanism for efficiently caching TMF objects retrieved
+// from external sources, reducing latency and improving system performance. The cache supports
+// upsert operations, freshness checks, and content-based hashing for efficient data management.
+//
+// Key components:
+//
+//   - TMFObject: An interface defining the common methods for all TMF object types.
+//   - TMFGeneralObject: A generic implementation of the TMFObject interface suitable for
+//     representing various TMForum objects.
+//   - Database management functions: Functions for creating, deleting, and vacuuming the
+//     SQLite database tables.
+//   - Data access functions: Functions for inserting, updating, retrieving, and deleting
+//     TMF objects from the database.
+//   - Utility functions: Functions for validating TMF objects, calculating hashes, and
+//     building SQL queries.
+//
+// The package leverages several external libraries, including:
+//
+//   - github.com/goccy/go-json: For JSON serialization and deserialization.
+//   - github.com/hesusruiz/domeproxy/config: For configuration settings.
+//   - github.com/hesusruiz/domeproxy/internal/errl: For error handling.
+//   - github.com/huandu/go-sqlbuilder: For building SQL queries.
+//   - zombiezen.com/go/sqlite: For interacting with the SQLite database.
+//
+// The package is designed to be used in conjunction with a TMForum-compliant system, providing
+// a local caching layer to improve performance and reduce reliance on external data sources.
 package tmfcache
 
 import (
@@ -64,9 +97,10 @@ type TMFObject interface {
 
 	// Marshalling and Unmarshalling
 	String() string
-	MarshalJSON() ([]byte, error)
-	UnmarshalJSON(data []byte) error
-	FromMap(oMap map[string]any) error
+	// MarshalJSON() ([]byte, error)
+	// UnmarshalJSON(data []byte) error
+
+	// FromMap(oMap map[string]any) error
 	Validate() errl.ValidationMessages
 
 	// Hashes
@@ -131,43 +165,57 @@ var (
 
 var Verbose = false
 
-// FromMap is the main TMFObject constructor, and is used by all other constructors.
-// It performs validity checks when building the resulting TMFObject object.
-func (po *TMFGeneralObject) FromMap(inputMap map[string]any) error {
+/*
+TMFObjectFromMap creates a TMFObject from a map[string]any.
 
-	// Allocate a receiver object if it is nil, to allow unmarshal without previous allocation
-	if po == nil {
-		po = &TMFGeneralObject{}
+It performs several operations:
+  - Checks for the presence of a non-empty "id" field.
+  - Determines the resource name, either from the "resourceName" field or by deducing it from the ID (in a DOME context).
+  - Performs a sanity check on the input map using tmfObjectSanityCheck.
+  - For Category objects, assigns the organization identifier and name to the DOME operator.
+  - Extracts common TMF object fields (href, name, description, lifecycleStatus, version, lastUpdate, updated, organizationIdentifier, organization) from the map.
+  - Assigns the extracted fields to the corresponding fields in the TMFObject.
+  - Stores the entire input map in the TMFObject's ContentAsMap field.
+
+Returns:
+  - A TMFObject representing the data in the map, or nil if an error occurs.
+  - An error if any of the checks fail or if the ID is missing.
+*/
+func TMFObjectFromMap(inputMap map[string]any) (TMFObject, error) {
+	var err error
+	po := &TMFGeneralObject{}
+
+	id, _ := inputMap["id"].(string)
+	if len(id) == 0 {
+		return nil, errl.Errorf("id is nil or not a string: %v", inputMap["id"])
 	}
 
-	// Make sure the compulsory objects exist and that they have sensible values
-	err := tmfObjectSanityCheck(inputMap, false)
+	// Get the type of object if it is not set. The only way is to deduce it from the ID.
+	// But this only works in DOME context, where the ID is a URN.
+	resourceName := jpath.GetString(inputMap, "resourceName")
+	if len(resourceName) == 0 {
+		resourceName, err = config.FromIdToResourceName(po.ID)
+		if err != nil {
+			return nil, errl.Error(err)
+		}
+	}
+
+	// Make sure the compulsory attributes exist and that they have sensible values
+	err = tmfObjectSanityCheck(inputMap, false)
 	if err != nil {
 		slog.Error("invalid object", slogor.Err(err))
-		out, err := json.MarshalIndent(inputMap, "", "  ")
-		if err != nil {
-			return errl.Error(err)
-		}
-		fmt.Println(string(out))
-		return errl.Error(err)
+		PrettyPrint(inputMap)
+		return nil, errl.Error(err)
 	}
 
 	// Special treatment for Category objects, which do not belong to any Seller or Buyer.
-	// We assign them to the DOME Operator
-	if po.ResourceName == config.Category {
+	// We assign them to the Operator of the ecosystem.
+	if resourceName == config.Category {
 		po.SetOrganizationIdentifier(config.DOMEOperatorDid)
 		po.SetOrganization(config.DOMEOperatorName)
 	}
 
-	// The first thing we do is to deduce the resource name of the object from the ID
-	// In DOME, the rule is that the 'id' has embedded the resource name
-	resourceName, err := config.FromIdToResourceName(inputMap["id"].(string))
-	if err != nil {
-		return errl.Error(err)
-	}
-
 	// Extract the fields which are common to all TMF objects
-	id, _ := inputMap["id"].(string)
 	href, _ := inputMap["href"].(string)
 	name, _ := inputMap["name"].(string)
 	description, _ := inputMap["description"].(string)
@@ -193,92 +241,11 @@ func (po *TMFGeneralObject) FromMap(inputMap map[string]any) error {
 	po.Organization = organization
 	po.Updated = updated
 
-	// Look for the "Seller", "SellerOperator", "Buyer" and "BuyerOperator" roles
-	relatedParties, _ := inputMap["relatedParty"].([]any)
-
-	for _, rp := range relatedParties {
-
-		// Convert entry to a map
-		rpMap, _ := rp.(map[string]any)
-		if len(rpMap) == 0 {
-			slog.Error("invalid relatedParty", "tmfObject", id)
-			if out, err := json.MarshalIndent(rp, "", "  "); err == nil {
-				fmt.Println(string(out))
-			}
-			// Go to next entry
-			continue
-		}
-
-		rpId, _ := rpMap["id"].(string)
-		rpHref, _ := rpMap["href"].(string)
-		rpDid, _ := rpMap["did"].(string)
-		rpRole, _ := rpMap["role"].(string)
-		rpRole = strings.ToLower(rpRole)
-
-		// TODO: Enable this rule when full implementation is performed
-
-		// if len(rpId) == 0 {
-		// 	slog.Error("no id in related party", "tmfObject", id)
-		// 	if out, err := json.MarshalIndent(rp, "", "  "); err == nil {
-		// 		fmt.Println(string(out))
-		// 	}
-		// 	// Go to next entry
-		// 	continue
-		// }
-		if len(rpRole) == 0 {
-			slog.Error("no role in related party", "tmfObject", id)
-			if out, err := json.MarshalIndent(rp, "", "  "); err == nil {
-				fmt.Println(string(out))
-			}
-			// Go to next entry
-			continue
-		}
-
-		if rpRole != "seller" && rpRole != "selleroperator" && rpRole != "buyer" && rpRole != "buyeroperator" {
-			// Go to next entry
-			continue
-		}
-
-		if !strings.HasPrefix(rpDid, "did:elsi:") {
-			slog.Error("invalid DID prefix", "tmfObject", id)
-			if out, err := json.MarshalIndent(rp, "", "  "); err == nil {
-				fmt.Println(string(out))
-			}
-			// Go to next entry
-			continue
-		}
-
-		// Add a new relatedParty entry to the object
-		rpEntry := RelatedPartyRef{
-			Id:   rpId,
-			Href: rpHref,
-			Role: rpRole,
-			Did:  rpDid,
-		}
-		po.RelatedParty = append(po.RelatedParty, rpEntry)
-
-		// Set the convenience fields in the object
-		switch rpRole {
-		case "seller":
-			po.Seller = rpDid
-			po.OrganizationIdentifier = rpDid
-
-		case "buyer":
-			po.Buyer = rpDid
-
-		case "selleroperator":
-			po.SellerOperator = rpDid
-
-		case "buyeroperator":
-			po.BuyerOperator = rpDid
-		}
-
-	}
-
 	// Store the whole map, with any updated contents
 	po.ContentAsMap = inputMap
 
-	return nil
+	return po, nil
+
 }
 
 func (po *TMFGeneralObject) Validate() errl.ValidationMessages {
@@ -304,64 +271,36 @@ func (po *TMFGeneralObject) Validate() errl.ValidationMessages {
 	return po.Messages
 }
 
-// UnmarshalJSON implements the [json.Unmarshall] interface.
-// It unmarshalls first to a map[string]any and then uses [FromMap] to perform validity checks while building the TMFObject.
-func (po *TMFGeneralObject) UnmarshalJSON(data []byte) error {
-	var oMap map[string]any
-	var err error
-
-	err = json.Unmarshal(data, &oMap)
-	if err != nil {
-		return errl.Error(err)
-	}
-
-	return po.FromMap(oMap)
-
-}
-
-func TMFObjectFromMap(oMap map[string]any) (TMFObject, error) {
-
-	po := &TMFGeneralObject{}
-	err := po.FromMap(oMap)
-	if err != nil {
-		return nil, err
-	}
-
-	return po, nil
-
-}
-
-func TMFObjectFromBytes(content []byte) (TMFObject, error) {
-
-	var tmf *TMFGeneralObject
-	err := json.Unmarshal(content, &tmf)
-	if err != nil {
-		return nil, err
-	}
-
-	return tmf, nil
-}
-
-func TMFObjectFromBytesExt(dbconn *sqlite.Conn, tmf *TMFCache, content []byte) (TMFObject, bool, error) {
+// TMFObjectFromBytes unmarshals a byte slice into a TMFObject.
+// It first unmarshals the byte slice into a map[string]any, then converts the map to a TMFObject using FromMapExt.
+// It returns the TMFObject and an error, if any.
+//
+// Parameters:
+//
+//	content: A byte slice containing the JSON representation of the TMFObject.
+//
+// Returns:
+//
+//	TMFObject: The unmarshaled TMFObject.
+//	error: An error, if any occurred during unmarshaling or conversion.
+func TMFObjectFromBytes(content []byte, resourceName string) (TMFObject, error) {
 	var oMap map[string]any
 	var err error
 
 	err = json.Unmarshal(content, &oMap)
 	if err != nil {
-		return nil, false, errl.Error(err)
+		return nil, errl.Error(err)
 	}
 
-	tmfObject, err := FromMapExt(oMap)
+	// Make sure the resourceName is set in the map
+	oMap["resourceName"] = resourceName
+
+	tmfObject, err := TMFObjectFromMap(oMap)
 	if err != nil {
-		return nil, false, errl.Error(err)
+		return nil, errl.Error(err)
 	}
 
-	fixed, err := tmf.FixTMFObject(dbconn, tmfObject, FixHigh)
-	if err != nil {
-		return nil, false, errl.Error(err)
-	}
-
-	return tmfObject, fixed, nil
+	return tmfObject, nil
 }
 
 func localOrganizationByDid(dbconn *sqlite.Conn, did string) (TMFObject, error) {
@@ -391,7 +330,7 @@ func localOrganizationByDid(dbconn *sqlite.Conn, did string) (TMFObject, error) 
 
 	updated := stmt.GetInt64("updated")
 
-	tmf, err := TMFObjectFromBytes(content)
+	tmf, err := TMFObjectFromBytes(content, config.Organization)
 
 	// var tmf *TMFGeneralObject
 	// err = json.Unmarshal(content, &tmf)
@@ -405,23 +344,42 @@ func localOrganizationByDid(dbconn *sqlite.Conn, did string) (TMFObject, error) 
 
 }
 
+// localOrganizationByIdRetrieveOrUpdate retrieves a TMFObject representing an organization by its ID from the local SQLite database.
+// If the organization's identifier is missing (because the object is an old version), it attempts to
+// update the object in the database with information found in the object's "externalReference" field.
+// Returns the TMFObject (as *TMFGeneralObject) and an error if any step fails.
+//
+// Parameters:
+//   - dbconn: SQLite database connection.
+//   - id: The TMF unique identifier of the object.
+//
+// Returns:
+//   - TMFObject: The retrieved or updated TMFObject representing the organization.
+//   - error: An error if retrieval or update fails, or if the object is invalid.
 func localOrganizationByIdRetrieveOrUpdate(dbconn *sqlite.Conn, id string) (TMFObject, error) {
 
-	oo, _, err := LocalRetrieveTMFObject(dbconn, id, "")
+	// Be optimistic and do not start a database transaction yet.
+	// If the object has already the modern format, we can return it directly.
+
+	oo, _, err := LocalRetrieveTMFObject(dbconn, id, config.Organization, "")
 	if err != nil {
 		return nil, errl.Error(err)
 	}
 
+	// If the Organization object already has the organizationIdentifier field set, we can return it directly
 	if oo.GetOrganizationIdentifier() != "" {
 		return oo, nil
 	}
+
+	// At this point, we know that the object is an old version, so we need to update it.
+	// We start a db transaction and read again the object, just in case there are concurrent updates.
 
 	// Start a SAVEPOINT and defer its Commit/Rollback
 	release := sqlitex.Save(dbconn)
 	defer release(&err)
 
 	// Retrieve again the object inside the transaction, to make sure we operate with the latest data
-	oo, _, err = LocalRetrieveTMFObject(dbconn, id, "")
+	oo, _, err = LocalRetrieveTMFObject(dbconn, id, config.Organization, "")
 	if err != nil {
 		return nil, errl.Error(err)
 	}
@@ -507,94 +465,102 @@ func localOrganizationByIdRetrieveOrUpdate(dbconn *sqlite.Conn, id string) (TMFO
 
 }
 
-func (po *TMFGeneralObject) FromMapExt(inputMap map[string]any) (TMFObject, error) {
-	if po == nil {
-		po = &TMFGeneralObject{}
-	}
+// FromMapExt populates a TMFGeneralObject from a map[string]any.
+// It performs several operations:
+//   - It retrieves the 'id' from the map, or uses the existing ID if already set.
+//   - It deduces the resource name from the ID using config.FromIdToResourceName.
+//   - It performs a sanity check on the input map using tmfObjectSanityCheck.
+//   - For Category resources, it assigns the DOME Operator as the organization.
+//   - It extracts common TMF object fields (href, name, description, etc.) from the map.
+//   - It assigns the extracted fields to the TMFGeneralObject.
+//   - It stores the entire map in the ContentAsMap field.
+//
+// Parameters:
+//
+//	inputMap: A map[string]any containing the data to populate the TMFGeneralObject.
+//
+// Returns:
+//
+//	A TMFObject interface, which is the populated TMFGeneralObject, or an error if any operation fails.
+//
+// Errors:
+//   - If the 'id' is missing or not a string.
+//   - If config.FromIdToResourceName fails.
+//   - If tmfObjectSanityCheck fails.
+//   - If JSON marshaling fails during error handling.
+// func (po *TMFGeneralObject) FromMapExt(inputMap map[string]any) (TMFObject, error) {
+// 	var err error
 
-	id := po.ID
-	if id == "" {
-		id, _ = inputMap["id"].(string)
-		if len(id) == 0 {
-			return nil, errl.Errorf("id is nil or not a string: %v", inputMap["id"])
-		}
-	}
+// 	// Allocate a receiver object if it is nil, to allow unmarshal without previous allocation
+// 	if po == nil {
+// 		po = &TMFGeneralObject{}
+// 	}
 
-	// The first thing we do is to deduce the resource name of the object from the ID
-	// In DOME, the rule is that the 'id' has embedded the resource name
-	resourceName, err := config.FromIdToResourceName(inputMap["id"].(string))
-	if err != nil {
-		return nil, errl.Error(err)
-	}
+// 	id := po.ID
+// 	if id == "" {
+// 		id, _ = inputMap["id"].(string)
+// 		if len(id) == 0 {
+// 			return nil, errl.Errorf("id is nil or not a string: %v", inputMap["id"])
+// 		}
+// 	}
 
-	// switch resourceName {
-	// case config.Organization:
+// 	// Get the type of object if it is not set. The only way is to deduce it from the ID.
+// 	// But this only works in DOME context, where the ID is a URN.
+// 	resourceName := jpath.GetString(inputMap, "resourceName")
+// 	if len(resourceName) == 0 {
+// 		resourceName, err = config.FromIdToResourceName(po.ID)
+// 		if err != nil {
+// 			return nil, errl.Error(err)
+// 		}
+// 	}
 
-	// 	po := &TMFOrganization{}
-	// 	err = po.FromMap(inputMap)
-	// 	if err != nil {
-	// 		return nil, errl.Error(err)
-	// 	}
-	// 	return po, nil
+// 	// Make sure the compulsory attributes exist and that they have sensible values
+// 	err = tmfObjectSanityCheck(inputMap, false)
+// 	if err != nil {
+// 		slog.Error("invalid object", slogor.Err(err))
+// 		PrettyPrint(inputMap)
+// 		return nil, errl.Error(err)
+// 	}
 
-	// }
+// 	// Special treatment for Category objects, which do not belong to any Seller or Buyer.
+// 	// We assign them to the Operator of the ecosystem.
+// 	if resourceName == config.Category {
+// 		po.SetOrganizationIdentifier(config.DOMEOperatorDid)
+// 		po.SetOrganization(config.DOMEOperatorName)
+// 	}
 
-	// Make sure the compulsory attributes exist and that they have sensible values
-	err = tmfObjectSanityCheck(inputMap, false)
-	if err != nil {
-		slog.Error("invalid object", slogor.Err(err))
-		out, err := json.MarshalIndent(inputMap, "", "  ")
-		if err != nil {
-			return nil, errl.Error(err)
-		}
-		fmt.Println(string(out))
-		return nil, errl.Error(err)
-	}
+// 	// Extract the fields which are common to all TMF objects
+// 	href, _ := inputMap["href"].(string)
+// 	name, _ := inputMap["name"].(string)
+// 	description, _ := inputMap["description"].(string)
+// 	lifecycleStatus, _ := inputMap["lifecycleStatus"].(string)
+// 	version, _ := inputMap["version"].(string)
+// 	lastUpdate, _ := inputMap["lastUpdate"].(string)
+// 	updated, _ := inputMap["updated"].(int64)
 
-	// Special treatment for Category objects, which do not belong to any Seller or Buyer.
-	// We assign them to the DOME Operator.
-	if resourceName == config.Category {
-		po.SetOrganizationIdentifier(config.DOMEOperatorDid)
-		po.SetOrganization(config.DOMEOperatorName)
-	}
+// 	// TODO: get rid of these fields, when Seller and SellerOperator are fully implemented
+// 	organizationIdentifier, _ := inputMap["organizationIdentifier"].(string)
+// 	organization, _ := inputMap["organization"].(string)
 
-	// Extract the fields which are common to all TMF objects
-	href, _ := inputMap["href"].(string)
-	name, _ := inputMap["name"].(string)
-	description, _ := inputMap["description"].(string)
-	lifecycleStatus, _ := inputMap["lifecycleStatus"].(string)
-	version, _ := inputMap["version"].(string)
-	lastUpdate, _ := inputMap["lastUpdate"].(string)
-	updated, _ := inputMap["updated"].(int64)
+// 	// Assign the map fields to the struct
+// 	po.ID = id
+// 	po.Href = href
+// 	po.ResourceName = resourceName
+// 	po.Name = name
+// 	po.Description = description
+// 	po.LifecycleStatus = lifecycleStatus
+// 	po.Version = version
+// 	po.LastUpdate = lastUpdate
+// 	po.OrganizationIdentifier = organizationIdentifier
+// 	po.Organization = organization
+// 	po.Updated = updated
 
-	// TODO: get rid of these fields, when Seller and SellerOperator are fully implemented
-	organizationIdentifier, _ := inputMap["organizationIdentifier"].(string)
-	organization, _ := inputMap["organization"].(string)
+// 	// Store the whole map, with any updated contents
+// 	po.ContentAsMap = inputMap
 
-	// Assign the map fields to the struct
-	po.ID = id
-	po.Href = href
-	po.ResourceName = resourceName
-	po.Name = name
-	po.Description = description
-	po.LifecycleStatus = lifecycleStatus
-	po.Version = version
-	po.LastUpdate = lastUpdate
-	po.OrganizationIdentifier = organizationIdentifier
-	po.Organization = organization
-	po.Updated = updated
+// 	return po, nil
 
-	// Store the whole map, with any updated contents
-	po.ContentAsMap = inputMap
-
-	return po, nil
-
-}
-
-func FromMapExt(inputMap map[string]any) (TMFObject, error) {
-	po := &TMFGeneralObject{}
-	return po.FromMapExt(inputMap)
-}
+// }
 
 type FixLevel int
 
@@ -901,34 +867,15 @@ func tmfObjectSanityCheck(oMap map[string]any, strict bool) error {
 	var errorList []error
 
 	// id MUST exist
-	if oMap["id"] == nil {
-		return errl.Errorf("id field is nil")
-	}
-
-	id, ok := oMap["id"].(string)
-	if !ok {
-		return errl.Errorf("invalid id type: %v", oMap["id"])
-	}
-
-	if !strings.HasPrefix(id, "urn:ngsi-ld:") {
-		return errl.Errorf("invalid id prefix: %s", id)
+	id := jpath.GetString(oMap, "id")
+	if len(id) == 0 {
+		return errl.Errorf("id is nil or not a string: %v", oMap["id"])
 	}
 
 	// href MUST exist
-	if oMap["href"] == nil {
-		return errl.Errorf("href field is nil, id: %s", id)
-	}
-
-	href, ok := oMap["href"].(string)
-	if !ok {
-		return errl.Errorf("invalid href type: %v", oMap["href"])
-	}
-	if !strings.HasPrefix(href, "urn:ngsi-ld:") {
-		return errl.Errorf("invalid href prefix: %s", href)
-	}
-
-	if id != href {
-		return errl.Errorf("id (%s) and href (%s) do not match", id, href)
+	href := jpath.GetString(oMap, "href")
+	if len(href) == 0 {
+		return errl.Errorf("href is nil or not a string: %v", oMap["href"])
 	}
 
 	if strict {
@@ -1159,7 +1106,6 @@ func (po *TMFGeneralObject) SetOwner(organizationIdentifier string, organization
 
 	po.SetSeller(href, organizationIdentifier)
 
-	return
 }
 
 // For most resources, the Owner is the Seller.
@@ -1251,17 +1197,54 @@ func (o *TMFGeneralObject) GetIDMID() (organizationDid string, organizationName 
 // ******************************************************************************************
 // ******************************************************************************************
 
-var createTMFTableSQL = `
+// tmfobject Table Schema
+//
+// The `tmfobject` table serves as a local cache for TMForum objects retrieved from a remote server.
+// It stores various attributes of TMF objects to allow for efficient local querying.
+// The table is created with `WITHOUT ROWID` for performance reasons, using the composite primary key of `id` and `version`.
+//
+// # Columns
+//
+// `id` `TEXT` `NOT NULL`: The unique identifier of the TMF object, typically a URN like `urn:ngsi-ld:<type>:<id>`.
+// `resource` `TEXT` `NOT NULL`: The name of the TMF resource type, like `productOffering` or `catalog`.
+// `version` `TEXT`: The version of the TMF object. Paired with `id`, it uniquely identifies a specific version of an object.
+// `organizationIdentifier` `TEXT`: The unique identifier of the organization that owns or is associated with the object.
+// `organization` `TEXT`: The name of the organization associated with the `organizationIdentifier`.
+//
+// These are for access control
+// `seller` `TEXT`: The DID of the seller party in a transaction or offering.
+// `buyer` `TEXT`: The DID of the buyer party in a transaction or offering.
+// `sellerOperator` `TEXT`: The DID of the operator for the seller party.
+// `buyerOperator` `TEXT`: The DID of the operator for the buyer party.
+//
+// `name` `TEXT` `NOT NULL`: The human-readable name of the TMF object.
+// `description` `TEXT`: A textual description of the TMF object.
+// `lifecycleStatus` `TEXT`: The current stage in the lifecycle of the object, for example, `Launched` or `Active`.
+// `lastUpdate` `TEXT` `NOT NULL`: A timestamp indicating when the object was last updated in the source system.
+//
+// `content` `BLOB` `NOT NULL`: The full JSON payload of the TMF object. We do some queries in the object when needed.
+// `hash` `BLOB`: A SHA256 hash of the `content` field, used to quickly detect changes in the object's data.
+//
+// `created` `INTEGER`: A Unix timestamp representing when the record was first inserted into this cache table.
+// `updated` `INTEGER`: A Unix timestamp representing when this record was last updated in the cache.
+//
+// # Indexes
+//
+// `CREATE INDEX IF NOT EXISTS idx_hash ON tmfobject (hash);`
+//
+// An index is created on the `hash` column to speed up lookups based on the object's content hash.
+// This is useful for quickly checking if an object with the same content already exists in the cache.
+const createTMFTableSQL = `
 CREATE TABLE IF NOT EXISTS tmfobject (
 	"id" TEXT NOT NULL,
-	"version" TEXT,
+	"resource" TEXT NOT NULL,
+	"version" TEXT DEFAULT '0.1',
 	"organizationIdentifier" TEXT,
 	"organization" TEXT,
 	"seller" TEXT,
 	"buyer" TEXT,
 	"sellerOperator" TEXT,
 	"buyerOperator" TEXT,
-	"resource" TEXT NOT NULL,
 	"name" TEXT NOT NULL,
 	"description" TEXT,
 	"lifecycleStatus" TEXT,
@@ -1271,8 +1254,8 @@ CREATE TABLE IF NOT EXISTS tmfobject (
 	"created" INTEGER,
 	"updated" INTEGER,
 
-	PRIMARY KEY ("id", "version")
-) WITHOUT ROWID;
+	PRIMARY KEY ("id", "resource", "version")
+);
 PRAGMA journal_mode = WAL;
 CREATE INDEX IF NOT EXISTS idx_hash ON tmfobject (hash);
 `
@@ -1335,6 +1318,44 @@ func deleteTables(dbpool *sqlitex.Pool) error {
 // LocalCheckIfExists reports if there is an object in the database with a given id and version.
 // It returns in addition its hash and freshness to enable comparisons with other objects.
 func LocalCheckIfExists(
+	dbconn *sqlite.Conn, id string, resource string, version string,
+) (exists bool, hash []byte, freshness int, err error) {
+	if dbconn == nil {
+		return false, nil, 0, errl.Errorf("dbconn is nil")
+	}
+
+	// Check if the row already exists, with the same version
+	const CheckIfExistsTMFObjectSQL = `SELECT hash, updated FROM tmfobject WHERE id = :id AND resource = :resource AND version = :version;`
+	selectStmt, err := dbconn.Prepare(CheckIfExistsTMFObjectSQL)
+	if err != nil {
+		return false, nil, 0, errl.Errorf("CheckIfExists: %w", err)
+	}
+	defer selectStmt.Reset()
+
+	selectStmt.SetText(":id", id)
+	selectStmt.SetText(":resource", resource)
+	selectStmt.SetText(":version", version)
+
+	hasRow, err := selectStmt.Step()
+	if err != nil {
+		return false, nil, 0, errl.Errorf("CheckIfExists: %w", err)
+	}
+
+	// Each object has a hash to make sure it is the same object, even if the version is the same
+	hash = make([]byte, selectStmt.GetLen("hash"))
+	selectStmt.GetBytes("hash", hash)
+
+	updated := selectStmt.GetInt64("updated")
+	now := time.Now().Unix()
+	freshness = int(now - updated)
+
+	return hasRow, hash, freshness, nil
+
+}
+
+// LocalCheckIfExists reports if there is an object in the database with a given id and version.
+// It returns in addition its hash and freshness to enable comparisons with other objects.
+func LocalCheckIfExistssdfsdf(
 	dbconn *sqlite.Conn, id string, version string,
 ) (exists bool, hash []byte, freshness int, err error) {
 	if dbconn == nil {
@@ -1369,6 +1390,11 @@ func LocalCheckIfExists(
 
 }
 
+// objectFromDbRecord constructs a TMFObject from a given sqlite.Stmt database record.
+// It populates the TMFGeneralObject fields by extracting values from the statement,
+// deserializes the "content" field from JSON into a map, and assigns both the raw JSON
+// and the map representation to the object. Returns the populated TMFObject or an error
+// if JSON unmarshalling fails.
 func objectFromDbRecord(stmt *sqlite.Stmt) (TMFObject, error) {
 
 	dbObject := &TMFGeneralObject{}
@@ -1408,7 +1434,7 @@ func objectFromDbRecord(stmt *sqlite.Stmt) (TMFObject, error) {
 
 }
 
-func LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, version string) (pod TMFObject, found bool, err error) {
+func LocalRetrieveTMFObject(dbconn *sqlite.Conn, id string, resource string, version string) (pod TMFObject, found bool, err error) {
 	if dbconn == nil {
 		return nil, false, errl.Errorf("dbconn is nil")
 	}
@@ -1417,15 +1443,15 @@ func LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, version string) (p
 	// Except for admin users, normal users are given the latest version of the object.
 	var stmt *sqlite.Stmt
 	if len(version) == 0 {
-		const RetrieveTMFObjectNoVersionSQL = `SELECT * FROM tmfobject WHERE id = :id ORDER BY version DESC LIMIT 1;`
+		const RetrieveTMFObjectNoVersionSQL = `SELECT * FROM tmfobject WHERE id = :id AND resource = :resource ORDER BY version DESC LIMIT 1;`
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectNoVersionSQL)
 		defer stmt.Reset()
-		stmt.SetText(":id", href)
+		stmt.SetText(":id", id)
 	} else {
-		const RetrieveTMFObjectSQL = `SELECT * FROM tmfobject WHERE id = :id AND version = :version;`
+		const RetrieveTMFObjectSQL = `SELECT * FROM tmfobject WHERE id = :id AND resource = :resource AND version = :version;`
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectSQL)
 		defer stmt.Reset()
-		stmt.SetText(":id", href)
+		stmt.SetText(":id", id)
 		stmt.SetText(":version", version)
 	}
 	if err != nil {
@@ -1434,7 +1460,7 @@ func LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, version string) (p
 
 	hasRow, err := stmt.Step()
 	if err != nil {
-		slog.Error("RetrieveLocalTMFObject", "href", href, "error", err)
+		slog.Error("RetrieveLocalTMFObject", "href", id, "error", err)
 		return nil, false, errl.Error(err)
 	}
 
@@ -1447,27 +1473,17 @@ func LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, version string) (p
 		return nil, false, errl.Error(err)
 	}
 
-	// tmf, err := dbObject.FromMapExt(oMap)
-	// if err != nil {
-	// 	return nil, false, errl.Error(err)
-	// }
-
-	// _, err = FixTMFObject(dbconn, tmf, FixHigh)
-	// if err != nil {
-	// 	return nil, false, errl.Error(err)
-	// }
-
 	return dbObject, true, nil
 
 }
 
-func LocalRetrieveListTMFObject(dbconn *sqlite.Conn, tmfResource string, queryValues url.Values) (pos []TMFObject, found bool, err error) {
+func LocalRetrieveListTMFObject(dbconn *sqlite.Conn, resource string, queryValues url.Values) (pos []TMFObject, found bool, err error) {
 	if dbconn == nil {
 		return nil, false, errl.Errorf("dbconn is nil")
 	}
 
 	// Build the SQL SELECT based on the query passed on the HTTP request, as specified in TMForum
-	sql, args := BuildSelectFromParms(tmfResource, queryValues)
+	sql, args := BuildSelectFromParms(resource, queryValues)
 
 	var resultPOs []TMFObject
 
@@ -1519,6 +1535,7 @@ func (po *TMFGeneralObject) LocalUpdateInStorage(dbconn *sqlite.Conn) error {
 
 	// These are used for the WHERE clause
 	updateStmt.SetText(":id", po.ID)
+	updateStmt.SetText(":resource", po.ResourceName)
 	updateStmt.SetText(":version", po.Version)
 
 	// These are the updated fields
@@ -1530,7 +1547,6 @@ func (po *TMFGeneralObject) LocalUpdateInStorage(dbconn *sqlite.Conn) error {
 	updateStmt.SetText(":sellerOperator", po.SellerOperator)
 	updateStmt.SetText(":buyerOperator", po.BuyerOperator)
 
-	updateStmt.SetText(":resource", po.ResourceName)
 	updateStmt.SetText(":name", po.Name)
 	updateStmt.SetText(":description", po.Description)
 	updateStmt.SetText(":lifecycleStatus", po.LifecycleStatus)
@@ -1549,6 +1565,10 @@ func (po *TMFGeneralObject) LocalUpdateInStorage(dbconn *sqlite.Conn) error {
 	return nil
 }
 
+// LocalInsertInStorage inserts the TMFGeneralObject into the provided SQLite database connection.
+// It provides default values for some of th efields, if they are not provided.
+// The method also computes and stores the object's hash, and sets the creation and update timestamps.
+// Returns an error if the database connection is nil, the hash is nil, or if any database operation fails.
 func (po *TMFGeneralObject) LocalInsertInStorage(dbconn *sqlite.Conn) error {
 	if dbconn == nil {
 		return errl.Errorf("dbconn is nil")
@@ -1571,6 +1591,7 @@ func (po *TMFGeneralObject) LocalInsertInStorage(dbconn *sqlite.Conn) error {
 	defer insertStmt.Reset()
 
 	insertStmt.SetText(":id", po.ID)
+	insertStmt.SetText(":resource", po.ResourceName)
 	insertStmt.SetText(":version", po.Version)
 	insertStmt.SetText(":organizationIdentifier", po.OrganizationIdentifier)
 	insertStmt.SetText(":organization", po.Organization)
@@ -1580,7 +1601,6 @@ func (po *TMFGeneralObject) LocalInsertInStorage(dbconn *sqlite.Conn) error {
 	insertStmt.SetText(":sellerOperator", po.SellerOperator)
 	insertStmt.SetText(":buyerOperator", po.BuyerOperator)
 
-	insertStmt.SetText(":resource", po.ResourceName)
 	insertStmt.SetText(":name", po.Name)
 	insertStmt.SetText(":description", po.Description)
 	insertStmt.SetText(":lifecycleStatus", po.LifecycleStatus)
@@ -1600,6 +1620,18 @@ func (po *TMFGeneralObject) LocalInsertInStorage(dbconn *sqlite.Conn) error {
 	return nil
 }
 
+// LocalUpsertTMFObject inserts or updates a TMFGeneralObject in the local SQLite database.
+// It first checks if a record with the same ID and version exists. If it exists and the data is
+// fresh (based on maxFreshness) and the content hash matches, the function returns early.
+// If the data is stale or the hash differs, it updates the existing record. If no such record exists,
+// it inserts the object as a new row. The operation is wrapped in a SQLite SAVEPOINT for transactional safety.
+//
+// Parameters:
+//   - dbconn: SQLite database connection.
+//   - maxFreshness: Maximum allowed freshness (in seconds) for the existing record.
+//
+// Returns:
+//   - err: An error if the operation fails, or nil on success.
 func (po *TMFGeneralObject) LocalUpsertTMFObject(dbconn *sqlite.Conn, maxFreshness int) (err error) {
 	if dbconn == nil {
 		return errl.Errorf("dbconn is nil")
@@ -1609,21 +1641,24 @@ func (po *TMFGeneralObject) LocalUpsertTMFObject(dbconn *sqlite.Conn, maxFreshne
 	release := sqlitex.Save(dbconn)
 	defer release(&err)
 
-	// Get the type of object from the ID
-	resourceName, err := config.FromIdToResourceName(po.ID)
-	if err != nil {
-		return errl.Error(err)
+	// Get the type of object if it is not set. The only way is to deduce it from the ID.
+	// But this only works in DOME context, where the ID is a URN.
+	if len(po.ResourceName) == 0 {
+		resourceName, err := config.FromIdToResourceName(po.ID)
+		if err != nil {
+			return errl.Error(err)
+		}
+		po.ResourceName = resourceName
 	}
-	po.ResourceName = resourceName
 
 	// Check if the row already exists, with the same version
-	hasRow, hash, freshness, err := LocalCheckIfExists(dbconn, po.ID, po.Version)
+	objectExists, hash, freshness, err := LocalCheckIfExists(dbconn, po.ID, po.ResourceName, po.Version)
 	if err != nil {
 		return errl.Error(err)
 	}
 
 	// The id and version are the same, but we have to check the hash to see if we have to update the record
-	if hasRow {
+	if objectExists {
 
 		fresh := freshness < maxFreshness
 		newHash := po.Hash()

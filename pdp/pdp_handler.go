@@ -208,7 +208,7 @@ func AuthorizeREAD(
 
 	// var tmfObject tmfcache.TMFObject
 	// var local bool
-	ro, local, err := tmfCache.RetrieveOrUpdateObject(nil, id, "", "", "", tmfcache.LocalOrRemote)
+	ro, local, err := tmfCache.RetrieveOrUpdateObject(nil, id, tmfResource, "", "", "", tmfcache.LocalOrRemote)
 	if err != nil {
 		return nil, errl.Errorf("retrieving %s: %w", id, err)
 	}
@@ -353,7 +353,7 @@ func AuthorizeUPDATE(
 	logger.Debug("AuthorizeUPDATE: retrieving", "type", tmfResource, "id", id)
 
 	// Check if the object is already in the local database
-	ro, found, err := tmf.LocalRetrieveTMFObject(nil, id, "")
+	ro, found, err := tmf.LocalRetrieveTMFObject(nil, id, tmfResource, "")
 	if err != nil {
 		return nil, errl.Errorf("retrieving from cache %s: %w", id, err)
 	}
@@ -413,13 +413,13 @@ func AuthorizeUPDATE(
 	// 7. Send the request to the central TMForum APIs, to update the object.
 	// **********************************************************************************
 
-	hostAndPath, err := tmf.GetHostAndPathFromResourcename(tmfResource)
+	hostAndPath, err := tmf.UpstreamHostAndPathFromResource(tmfResource)
 	if err != nil {
 		return nil, errl.Errorf("retrieving host and path for resource %s: %w", tmfResource, err)
 	}
 
 	// We pass the same authorization token as the one we received from the caller
-	remotepo, err := doPATCH(logger, hostAndPath, tokString, userOrgId, requestBody)
+	remotepo, err := doPATCH(logger, hostAndPath, tokString, userOrgId, requestBody, tmfResource)
 	if err != nil {
 		logger.Error("AuthorizeUPDATE: performing PATCH", slogor.Err(err))
 		return nil, errl.Errorf("not authorized: %w", err)
@@ -519,14 +519,14 @@ func AuthorizeCREATE(
 
 	// Use the updated incoming object for the outgoing request
 
-	hostAndPath, err := tmf.GetHostAndPathFromResourcename(tmfResource)
+	hostAndPath, err := tmf.UpstreamHostAndPathFromResource(tmfResource)
 	if err != nil {
 		return nil, errl.Errorf("retrieving host and path for resource %s: %w", tmfResource, err)
 	}
 
 	// Send the POST to the central server.
 	// A POST in TMForum does not reply with any data.
-	tmfObject, err := doTMFPOST(logger, tmf.HttpClient, hostAndPath, tokString, incomingObjectArgument)
+	tmfObject, err := doTMFPOST(logger, tmf.HttpClient, hostAndPath, tokString, incomingObjectArgument, tmfResource)
 	if err != nil {
 		return nil, errl.Errorf("creating object in upstream server: %w", err)
 	}
@@ -550,6 +550,7 @@ func doTMFPOST(
 	url string,
 	auth_token string,
 	createObject StarTMFMap,
+	tmfResource string,
 ) (tmfcache.TMFObject, error) {
 
 	organizationIdentifier := createObject["organizationIdentifier"].(string)
@@ -601,7 +602,7 @@ func doTMFPOST(
 	}
 
 	// The body of the response has the newly created object
-	tmfObject, err := tmfcache.TMFObjectFromBytes(responseBody)
+	tmfObject, err := tmfcache.TMFObjectFromBytes(responseBody, tmfResource)
 	if err != nil {
 		return nil, errl.Errorf("creating object from response: %w", err)
 	}
@@ -688,7 +689,7 @@ func tokenFromHeader(r *http.Request) string {
 	return ""
 }
 
-func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIdentifier string, request_body []byte) (tmfcache.TMFObject, error) {
+func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIdentifier string, request_body []byte, tmfResource string) (tmfcache.TMFObject, error) {
 
 	buf := bytes.NewReader(request_body)
 
@@ -719,7 +720,7 @@ func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIde
 		return nil, err
 	}
 
-	po, err := tmfcache.TMFObjectFromBytes(reply_body)
+	po, err := tmfcache.TMFObjectFromBytes(reply_body, tmfResource)
 	if err != nil {
 		logger.Error(err.Error())
 		return nil, err
@@ -833,28 +834,41 @@ func extractCallerInfo(
 	r *http.Request,
 ) (tokString string, tokenArgument StarTMFMap, user StarTMFMap, err error) {
 
-	tokString = tokenFromHeader(r)
-	if len(tokString) == 0 {
-		// An empty token is not considered an error, and the caller should enforce its existence
-		return tokString, StarTMFMap{}, StarTMFMap{}, nil
+	// Check if we are testing the PDP, and if so, return a dummy token
+	if ruleEngine.config.FakeClaims {
+
+		slog.Debug("PDP: using fake claims for testing")
+
+		tokString = "fake-tokenstring"
+		fakeClaims := getFakeClaims(true, "did:elsi:VATES-00000000", "ES")
+		tokenArgument = StarTMFMap(fakeClaims)
+
+	} else {
+
+		tokString = tokenFromHeader(r)
+		if len(tokString) == 0 {
+			// An empty token is not considered an error, and the caller should enforce its existence
+			return tokString, StarTMFMap{}, StarTMFMap{}, nil
+		}
+
+		// It is an error to send an invaild token with the request, so we have to verify it.
+
+		// Just some logs
+		slog.Debug("Access Token found", "token", tokString)
+
+		// Verify the token and extract the claims.
+		// A verification error stops processing.
+		var tokClaims map[string]any
+
+		tokClaims, _, err = ruleEngine.getClaimsFromToken(tokString)
+		if err != nil {
+			logger.Error("invalid access token", slogor.Err(err), "token", tokString)
+			return "", nil, nil, errl.Errorf("invalid access token: %w", err)
+		}
+
+		tokenArgument = StarTMFMap(tokClaims)
+
 	}
-
-	// It is an error to send an invaild token with the request, so we have to verify it.
-
-	// Just some logs
-	slog.Debug("Access Token found", "token", tokString)
-
-	// Verify the token and extract the claims.
-	// A verification error stops processing.
-	var tokClaims map[string]any
-
-	tokClaims, _, err = ruleEngine.getClaimsFromToken(tokString)
-	if err != nil {
-		logger.Error("invalid access token", slogor.Err(err), "token", tokString)
-		return "", nil, nil, errl.Errorf("invalid access token: %w", err)
-	}
-
-	tokenArgument = StarTMFMap(tokClaims)
 
 	// Create the user with default values. We always return a value
 	userArgument := StarTMFMap{

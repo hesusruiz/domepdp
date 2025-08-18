@@ -38,7 +38,7 @@ func (at AccessType) String() string {
 	return "LocalOrRemote"
 }
 
-// TMFCache is a struct that holds a pool of connections to the database and the URL of the DOME server.
+// TMFCache is a disk-based cache of TMForum data, using SQLite as the database.
 //
 // The database connection is a pool of connections that is shared by all the requests in this object.
 // The connection is returned to the pool when the object is closed.
@@ -87,7 +87,7 @@ func NewTMFCache(cfg *config.Config, delete bool) (*TMFCache, error) {
 		return nil, errl.Error(err)
 	}
 
-	// Create the http client to send requests to the remore TMF server
+	// Create the http client to send requests to the remote TMF server
 	// This instance is safe for concurrent use and will be reused for performance
 	tmf.HttpClient = &http.Client{
 		Timeout: 10 * time.Second,
@@ -103,12 +103,11 @@ func (tmf *TMFCache) Config() *config.Config {
 	return tmf.config
 }
 
-// func (tmf *TMFCache) Server() string {
-// 	return tmf.domeServer
-// }
-
-func (tmf *TMFCache) GetHostAndPathFromResourcename(resourceName string) (string, error) {
-	return tmf.config.GetHostAndPathFromResourcename(resourceName)
+// UpstreamHostAndPathFromResource returns the upstream host and path associated with the given resource name.
+// It delegates the lookup to the underlying configuration. If the resource is not found or an error occurs,
+// an error is returned.
+func (tmf *TMFCache) UpstreamHostAndPathFromResource(resourceName string) (string, error) {
+	return tmf.config.UpstreamHostAndPathFromResource(resourceName)
 }
 
 func (tmf *TMFCache) Close() {
@@ -144,7 +143,7 @@ func (tmf *TMFCache) CloneRemoteProductOfferings() ([]TMFObject, map[string]bool
 	for {
 
 		query := fmt.Sprintf("?limit=%d&offset=%d&lifecycleStatus=%s", limit, offset, lifecycleStatus)
-		hostAndPath, err := tmf.config.GetHostAndPathFromResourcename("productOffering")
+		hostAndPath, err := tmf.config.UpstreamHostAndPathFromResource("productOffering")
 		if err != nil {
 			return nil, nil, errl.Error(err)
 		}
@@ -322,7 +321,7 @@ func (tmf *TMFCache) CloneAllRemoteBAEResources() ([]TMFObject, map[string]bool,
 
 }
 
-// CloneRemoteResources retrieves or updates all objects for the given resource types in DOME.
+// CloneRemoteResources retrieves or updates all objects for the given resource types.
 func (tmf *TMFCache) CloneRemoteResources(resources []string) ([]TMFObject, map[string]bool, error) {
 	tmf.cloneMutex.Lock()
 	defer tmf.cloneMutex.Unlock()
@@ -346,81 +345,6 @@ func (tmf *TMFCache) CloneRemoteResources(resources []string) ([]TMFObject, map[
 
 }
 
-func (tmf *TMFCache) CloneRemoteObject(
-	dbconn *sqlite.Conn,
-	id string,
-	visitedObjects map[string]bool,
-) (object TMFObject, err error) {
-
-	if dbconn == nil {
-		var err error
-		dbconn, err = tmf.dbpool.Take(context.Background())
-		if err != nil {
-			return nil, errl.Error(fmt.Errorf("taking db connection: %w", err))
-		}
-		defer tmf.dbpool.Put(dbconn)
-	}
-
-	var local bool
-
-	// With RetrieveOrUpdateObject, we go to the remote server only if the object is not in the local cache and
-	// is not fresh enough
-	tmfObject, local, err := tmf.RetrieveOrUpdateObject(dbconn, id, "", "", "", LocalOrRemote)
-	if err != nil {
-		return nil, errl.Error(err)
-	}
-	if local {
-		slog.Debug("object retrieved locally", "id", id)
-	} else {
-		slog.Debug("object retrieved remotely", "id", id)
-	}
-
-	visitedObjects[tmfObject.GetID()] = true
-
-	// Until the TMForum APIs are updated to support all the required fields, we will try to "fix"
-	// the objects by deducing it and do whatever is possible.
-
-	// Fixes for 'ProductOffering', when it does not have the field 'seller'
-	if tmfObject.GetResourceName() == config.ProductOffering {
-
-		// At this moment, the ProductOffering object in DOME does not have
-		// the identification of the owner organization.
-		// We need that info to enable access control at the object level, so we retrieve
-		// the owner information indirectly by retrieving the ProductSpecification associated
-		// to the ProductOffering, and getting the relevant information from the RelatedParty
-		// object associated to the ProductSpecification.
-
-		sellerDid, sellerName, sellerHref, err := tmf.DeduceProductOfferingSeller(dbconn, tmfObject)
-		// organizationIdentifier, organization, err := tmf.DeduceProductOfferingOwner(dbconn, tmfObject.ContentAsMap)
-		if err != nil || sellerDid == "" {
-			slog.Warn("no identification deduced", "id", id, slogor.Err(err))
-		} else {
-			// Update our ProductOffering with the owner information retrieved
-			slog.Info("updating ProductOffering with owner", "id", id, "oid", sellerDid, "organization", sellerName)
-			tmfObject.SetSeller(sellerHref, sellerDid)
-			tmfObject.SetSellerOperator("", config.DOMEOperatorDid)
-			tmfObject.SetOrganization(sellerName)
-			tmfObject.SetOrganizationIdentifier(sellerDid)
-
-			// Update or Insert the ProductOffering in our database
-			if err := tmf.LocalUpsertTMFObject(nil, tmfObject); err != nil {
-				slog.Error("CloneRemoteResource", slogor.Err(err))
-			}
-
-		}
-
-		visitedObjects[tmfObject.GetID()] = true
-
-		// Recursively retrieve and save the sub-objects of this ProductOffering.
-		// We pass the owner information so those objects can include it with them.
-		tmf.visitMap(dbconn, tmfObject.GetContentAsMap(), sellerDid, sellerName, sellerHref, 3, visitedObjects)
-
-	}
-
-	return tmfObject, nil
-
-}
-
 func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects map[string]bool) (objectList []TMFObject, err error) {
 
 	dbconn, err := tmf.dbpool.Take(context.Background())
@@ -429,7 +353,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 	}
 	defer tmf.dbpool.Put(dbconn)
 
-	hostAndPath, err := tmf.config.GetHostAndPathFromResourcename(tmfResourceName)
+	hostAndPath, err := tmf.config.UpstreamHostAndPathFromResource(tmfResourceName)
 	if err != nil {
 		slog.Error("retrieving host and path for resource", "resourceName", tmfResourceName, slogor.Err(err))
 		return nil, errl.Error(err)
@@ -439,7 +363,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 	limit := 100
 	offset := 0
 
-	// We are only interested in ProductOfferings which are launched or active
+	// We are only interested in objects which are launched or active
 	// to the market (lifecycleStatus=Launched,Active)
 	lifecycleStatus := "Launched,Active"
 
@@ -453,30 +377,30 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 		url := hostAndPath + query
 		slog.Info("cloning all objects of type", "resourceName", tmfResourceName, "url", url)
 
-		// Get the list of objects from the DOME server
+		// Get the list of objects from the TMForum server
 		res, err := http.Get(url)
 		if err != nil {
 			slog.Error("performing GET", "url", url, slogor.Err(err))
-			// Just exit the loop, so we can return to caller whatever objects have been retrieved until now
+			// Just exit the loop, so we can return to the caller whatever objects have been retrieved until now
 			break
 		}
 		body, err := io.ReadAll(res.Body)
 		res.Body.Close()
 		if res.StatusCode > 299 {
 			slog.Error("Response failed", "status", res.StatusCode, "body", string(body), "url", url)
-			// Just exit the loop, so we can return to caller whatever objects have been retrieved until now
+			// Just exit the loop, so we can return to the caller whatever objects have been retrieved until now
 			break
 		}
 		if err != nil {
 			slog.Error("reading response body", slogor.Err(err), "url", url)
-			// Just exit the loop, so we can return to caller whatever objects have been retrieved until now
+			// Just exit the loop, so we can return to the caller whatever objects have been retrieved until now
 			break
 		}
 
-		// Check if it looks like a JSON object
+		// Check if it looks like a JSON object. For some errors, the server may (incorrectly) return a string or HTML
 		if body[0] != '{' && body[0] != '[' {
 			slog.Error("reply does not look as a JSON object", "url", url)
-			// Just exit the loop, so we can return to caller whatever objects have been retrieved until now
+			// Just exit the loop, so we can return to the caller whatever objects have been retrieved until now
 			break
 		}
 
@@ -485,7 +409,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 		err = json.Unmarshal(body, &resourceListMap)
 		if err != nil {
 			slog.Error("parsing JSON response", "url", url, slogor.Err(err))
-			// Just exit the loop, so we can return to caller whatever objects have been retrieved until now
+			// Just exit the loop, so we can return to the caller whatever objects have been retrieved until now
 			break
 		}
 
@@ -499,7 +423,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 		// Process each of the objects in the list
 		for _, oMap := range resourceListMap {
 
-			tmfObject, err := FromMapExt(oMap)
+			tmfObject, err := TMFObjectFromMap(oMap)
 			if err != nil {
 				slog.Error("FromMapExt", slogor.Err(err))
 				PrettyPrint(oMap)
@@ -600,7 +524,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 
 			if fixed && tmf.MustFixInBackend > FixNone {
 				resourceName := tmfObject.GetResourceName()
-				hostAndPath, err := tmf.config.GetHostAndPathFromResourcename(resourceName)
+				hostAndPath, err := tmf.config.UpstreamHostAndPathFromResource(resourceName)
 				if err != nil {
 					return nil, errl.Errorf("retrieving host and path for resource %s: %w", resourceName, err)
 				}
@@ -617,7 +541,7 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 				}
 				fmt.Println(string(body))
 
-				tmfObject, err = doPATCH(url, body)
+				tmfObject, err = doPATCH(url, body, resourceName)
 				if err != nil {
 					return nil, errl.Errorf("performing remote PATCH for resource %s: %w", resourceName, err)
 				}
@@ -658,7 +582,98 @@ func (tmf *TMFCache) CloneRemoteResource(tmfResourceName string, visitedObjects 
 
 }
 
-func doPATCH(url string, request_body []byte) (TMFObject, error) {
+// CloneRemoteObject retrieves a TMFObject by its ID and resource type, either from the local cache or remotely if not available or not fresh.
+// If the object is a ProductOffering and lacks seller information, attempts to deduce and update the seller and organization fields
+// by inspecting related ProductSpecification and RelatedParty objects. Updates the local cache with any deduced information.
+// Recursively processes sub-objects for ProductOffering resources, passing along owner information.
+// Tracks visited objects to prevent cycles during recursion.
+//
+// Parameters:
+//   - dbconn: Optional SQLite connection. If nil, a connection is taken from the pool.
+//   - id: The unique identifier of the TMFObject to clone.
+//   - resource: The resource type of the TMFObject.
+//   - visitedObjects: Map to track already visited object IDs to avoid processing cycles.
+//
+// Returns:
+//   - object: The retrieved and possibly updated TMFObject.
+//   - err: Error if retrieval, deduction, or update fails.
+func (tmf *TMFCache) CloneRemoteObject(
+	dbconn *sqlite.Conn,
+	id string,
+	resource string,
+	visitedObjects map[string]bool,
+) (object TMFObject, err error) {
+
+	if dbconn == nil {
+		var err error
+		dbconn, err = tmf.dbpool.Take(context.Background())
+		if err != nil {
+			return nil, errl.Error(fmt.Errorf("taking db connection: %w", err))
+		}
+		defer tmf.dbpool.Put(dbconn)
+	}
+
+	var local bool
+
+	// With RetrieveOrUpdateObject, we go to the remote server only if the object is not in the local cache and
+	// is not fresh enough
+	tmfObject, local, err := tmf.RetrieveOrUpdateObject(dbconn, id, resource, "", "", "", LocalOrRemote)
+	if err != nil {
+		return nil, errl.Error(err)
+	}
+	if local {
+		slog.Debug("object retrieved locally", "id", id)
+	} else {
+		slog.Debug("object retrieved remotely", "id", id)
+	}
+
+	visitedObjects[tmfObject.GetID()] = true
+
+	// Until the TMForum APIs are updated to support all the required fields, we will try to "fix"
+	// the objects by deducing it and do whatever is possible.
+
+	// Fixes for 'ProductOffering', when it does not have the field 'seller'
+	if tmfObject.GetResourceName() == config.ProductOffering {
+
+		// At this moment, the ProductOffering object in DOME does not have
+		// the identification of the owner organization.
+		// We need that info to enable access control at the object level, so we retrieve
+		// the owner information indirectly by retrieving the ProductSpecification associated
+		// to the ProductOffering, and getting the relevant information from the RelatedParty
+		// object associated to the ProductSpecification.
+
+		sellerDid, sellerName, sellerHref, err := tmf.DeduceProductOfferingSeller(dbconn, tmfObject)
+		// organizationIdentifier, organization, err := tmf.DeduceProductOfferingOwner(dbconn, tmfObject.ContentAsMap)
+		if err != nil || sellerDid == "" {
+			slog.Warn("no identification deduced", "id", id, slogor.Err(err))
+		} else {
+			// Update our ProductOffering with the owner information retrieved
+			slog.Info("updating ProductOffering with owner", "id", id, "oid", sellerDid, "organization", sellerName)
+			tmfObject.SetSeller(sellerHref, sellerDid)
+			tmfObject.SetSellerOperator("", config.DOMEOperatorDid)
+			tmfObject.SetOrganization(sellerName)
+			tmfObject.SetOrganizationIdentifier(sellerDid)
+
+			// Update or Insert the ProductOffering in our database
+			if err := tmf.LocalUpsertTMFObject(nil, tmfObject); err != nil {
+				slog.Error("CloneRemoteResource", slogor.Err(err))
+			}
+
+		}
+
+		visitedObjects[tmfObject.GetID()] = true
+
+		// Recursively retrieve and save the sub-objects of this ProductOffering.
+		// We pass the owner information so those objects can include it with them.
+		tmf.visitMap(dbconn, tmfObject.GetContentAsMap(), sellerDid, sellerName, sellerHref, 3, visitedObjects)
+
+	}
+
+	return tmfObject, nil
+
+}
+
+func doPATCH(url string, request_body []byte, tmfResource string) (TMFObject, error) {
 
 	buf := bytes.NewReader(request_body)
 
@@ -686,7 +701,7 @@ func doPATCH(url string, request_body []byte) (TMFObject, error) {
 		return nil, err
 	}
 
-	po, err := TMFObjectFromBytes(reply_body)
+	po, err := TMFObjectFromBytes(reply_body, tmfResource)
 	if err != nil {
 		slog.Error(err.Error())
 		return nil, err
@@ -747,7 +762,7 @@ func (tmf *TMFCache) FixRemoteResource(tmfResourceName string, visitedObjects ma
 	}
 	defer tmf.dbpool.Put(dbconn)
 
-	hostAndPath, err := tmf.config.GetHostAndPathFromResourcename(tmfResourceName)
+	hostAndPath, err := tmf.config.UpstreamHostAndPathFromResource(tmfResourceName)
 	if err != nil {
 		slog.Error("retrieving host and path for resource", "resourceName", tmfResourceName, slogor.Err(err))
 		return nil, errl.Error(err)
@@ -827,7 +842,7 @@ func (tmf *TMFCache) FixRemoteResource(tmfResourceName string, visitedObjects ma
 				continue
 			}
 
-			tmfObject, err := FromMapExt(oMap)
+			tmfObject, err := TMFObjectFromMap(oMap)
 			if err != nil {
 				slog.Error("FromMapExt", "id", id, slogor.Err(err))
 				continue
@@ -928,7 +943,7 @@ func (tmf *TMFCache) DeduceProductOfferingSeller(
 	// Use the 'id' field to retrieve the productSpecification object from the server
 	// After the call, the productSpecification object is already persisted locally with the owner information in the
 	// standard TMF format. We need to update the database in the format we need for efficient SQL queries.
-	productSpecification, _, err := tmf.RetrieveOrUpdateObject(dbconn, prodSpecID, "", "", "", LocalOrRemote)
+	productSpecification, _, err := tmf.RetrieveOrUpdateObject(dbconn, prodSpecID, config.ProductSpecification, "", "", "", LocalOrRemote)
 	if err != nil {
 		return "", "", "", errl.Errorf("retrieving productSpecification object: %w", err)
 	}
@@ -1013,7 +1028,7 @@ func (tmf *TMFCache) getRelatedPartyOwner(dbconn *sqlite.Conn, o TMFObject) (did
 			return "", "", "", errl.Errorf("relatedParty 'href' is nil or not a string: producSpecification: %s", thisID)
 		}
 
-		organizationObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, ownerOrgHref, "", "", "", LocalOrRemote)
+		organizationObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, ownerOrgHref, config.Organization, "", "", "", LocalOrRemote)
 		if err != nil {
 			slog.Error("DeduceProductOfferingSeller: retrieving organization object", "href", ownerOrgHref, "productSpecification", thisID, slogor.Err(err))
 			return "", "", "", errl.Errorf("retrieving organization object: %s for productSpecification %s", ownerOrgHref, thisID)
@@ -1037,6 +1052,7 @@ func (tmf *TMFCache) getRelatedPartyOwner(dbconn *sqlite.Conn, o TMFObject) (did
 func (tmf *TMFCache) RetrieveOrUpdateObject(
 	dbconn *sqlite.Conn,
 	id string,
+	resource string,
 	sellerDid string,
 	sellerName string,
 	sellerHref string,
@@ -1058,7 +1074,7 @@ func (tmf *TMFCache) RetrieveOrUpdateObject(
 	}
 
 	// Check if the object is already in the local database
-	localTmfObj, found, err := tmf.LocalRetrieveTMFObject(dbconn, id, "")
+	localTmfObj, found, err := tmf.LocalRetrieveTMFObject(dbconn, id, resource, "")
 	if err != nil {
 		if !errors.Is(err, ErrorNotFound) {
 			return nil, false, errl.Error(fmt.Errorf("retrieving local object: %w", err))
@@ -1073,7 +1089,7 @@ func (tmf *TMFCache) RetrieveOrUpdateObject(
 		}
 
 		// Get the object from the server
-		remotepo, err := tmf.RemoteRetrieveTMFObject(id)
+		remotepo, err := tmf.RemoteRetrieveTMFObject(id, resource)
 		if err != nil {
 			return nil, false, errl.Error(err)
 		}
@@ -1137,7 +1153,7 @@ func (tmf *TMFCache) RetrieveOrUpdateObject(
 	}
 
 	// Get the object from the server
-	remotepo, err := tmf.RemoteRetrieveTMFObject(id)
+	remotepo, err := tmf.RemoteRetrieveTMFObject(id, resource)
 	if err != nil {
 		return nil, false, errl.Error(err)
 	}
@@ -1179,9 +1195,10 @@ func (tmf *TMFCache) visitMap(
 		if tmf.Dump {
 			fmt.Printf("%shref: %v\n", indentStr(indent), href)
 		}
+		resource := jpath.GetString(currentObject, "resourceType")
 		if !visitedObjects[href] {
 			visitedObjects[href] = true
-			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, sellerDid, sellerName, sellerHref, LocalOrRemote)
+			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, resource, sellerDid, sellerName, sellerHref, LocalOrRemote)
 			if err != nil {
 				slog.Error(err.Error())
 			} else {
@@ -1254,15 +1271,15 @@ func (tmf *TMFCache) visitArray(
 // In DOME the href parameter is also the ID of the object which has to be used in the URL of the object to
 // retrieve it from the server.
 // The id parameter also has embedded the type of the object in the form of urn:ngsi-ld:<type>:<id>
-func (tmf *TMFCache) RemoteRetrieveTMFObject(id string) (TMFObject, error) {
+func (tmf *TMFCache) RemoteRetrieveTMFObject(id string, resourceName string) (TMFObject, error) {
 
-	// Parse the id to get the type of the object
-	resourceName, err := config.FromIdToResourceName(id)
-	if err != nil {
-		return nil, errl.Errorf("parsing the id: %w", err)
-	}
+	// // Parse the id to get the type of the object
+	// resourceName, err := config.FromIdToResourceName(id)
+	// if err != nil {
+	// 	return nil, errl.Errorf("parsing the id: %w", err)
+	// }
 
-	hostAndPath, err := tmf.config.GetHostAndPathFromResourcename(resourceName)
+	hostAndPath, err := tmf.config.UpstreamHostAndPathFromResource(resourceName)
 	if err != nil {
 		return nil, errl.Errorf("retrieving host and path for resource %s: %w", resourceName, err)
 	}
@@ -1294,7 +1311,7 @@ func (tmf *TMFCache) RemoteRetrieveTMFObject(id string) (TMFObject, error) {
 	}
 	defer tmf.dbpool.Put(dbconn)
 	// Create the in-memory object
-	po, _, err := TMFObjectFromBytesExt(dbconn, tmf, body)
+	po, err := TMFObjectFromBytes(body, resourceName)
 	if err != nil {
 		slog.Error(err.Error())
 		return nil, errl.Error(err)
@@ -1318,227 +1335,6 @@ func (tmf *TMFCache) RemoteRetrieveTMFObject(id string) (TMFObject, error) {
 	return po, nil
 }
 
-var tmfIDtoType = map[string]string{
-	"organization":           "organization",
-	"individual":             "individual",
-	"category":               "category",
-	"catalog":                "catalog",
-	"product-offering":       "productOffering",
-	"product-specification":  "productSpecification",
-	"product-offering-price": "productOfferingPrice",
-	"service-specification":  "serviceSpecification",
-	"resource-specification": "resourceSpecification",
-}
-
-var baePathPrefixForResourceName = map[string]string{
-	"organization":          "/party/organization/",
-	"category":              "/catalog/category/",
-	"catalog":               "/catalog/catalog/",
-	"productOffering":       "/catalog/productOffering/",
-	"productSpecification":  "/catalog/productSpecification/",
-	"productOfferingPrice":  "/catalog/productOfferingPrice/",
-	"serviceSpecification":  "/service/serviceSpecification/",
-	"resourceSpecification": "/resource/resourceSpecification/",
-}
-
-// func TMFObjectIDtoResourceName(id string) (string, error) {
-// 	const prefix = "urn:ngsi-ld:"
-// 	if !strings.HasPrefix(id, prefix) {
-// 		return "", fmt.Errorf("invalid ID format: %s", id)
-// 	}
-
-// 	parts := strings.Split(id, ":")
-// 	if len(parts) < 3 {
-// 		return "", fmt.Errorf("invalid ID format: %s", id)
-// 	}
-
-// 	tmfType := tmfIDtoType[parts[2]]
-// 	if tmfType == "" {
-// 		return "", fmt.Errorf("unknown TMF type: %s", parts[2])
-// 	}
-// 	return tmfType, nil
-// }
-
-// This is for the new definitions
-var ResourceToManagementSystem = map[string]string{
-	"agreement":                  "agreementManagement",
-	"agreementSpecification":     "agreementManagement",
-	"appliedCustomerBillingRate": "customerBillManagement",
-	"billFormat":                 "accountManagement",
-	"billPresentationMedia":      "accountManagement",
-	"billingAccount":             "accountManagement",
-	"billingCycleSpecification":  "accountManagement",
-	"cancelProductOrder":         "productOrderingManagement",
-	"catalog":                    "productCatalogManagement",
-	"category":                   "productCatalogManagement",
-	"customer":                   "customerManagement",
-	"customerBill":               "customerBillManagement",
-	"customerBillOnDemand":       "customerBillManagement",
-	"financialAccount":           "accountManagement",
-	"heal":                       "resourceFunctionActivation",
-	"individual":                 "party",
-	"migrate":                    "resourceFunctionActivation",
-	"monitor":                    "resourceFunctionActivation",
-	"organization":               "party",
-	"partyAccount":               "accountManagement",
-	"partyRole":                  "partyRoleManagement",
-	"product":                    "productInventory",
-	"productOffering":            "productCatalogManagement",
-	"productOfferingPrice":       "productCatalogManagement",
-	"productOrder":               "productOrderingManagement",
-	"productSpecification":       "productCatalogManagement",
-	"quote":                      "quoteManagement",
-	"resource":                   "resourceInventoryManagement",
-	"resourceCandidate":          "resourceCatalog",
-	"resourceCatalog":            "resourceCatalog",
-	"resourceCategory":           "resourceCatalog",
-	"resourceFunction":           "resourceFunctionActivation",
-	"resourceSpecification":      "resourceCatalog",
-	"scale":                      "resourceFunctionActivation",
-	"service":                    "serviceInventory",
-	"serviceCandidate":           "serviceCatalogManagement",
-	"serviceCatalog":             "serviceCatalogManagement",
-	"serviceCategory":            "serviceCatalogManagement",
-	"serviceSpecification":       "serviceCatalogManagement",
-	"settlementAccount":          "accountManagement",
-	"usage":                      "usageManagement",
-	"usageSpecification":         "usageManagement",
-}
-
-// func (tmf *TMFCache) CloneRemoteCatalogues() ([]*TMFObject, map[string]bool, error) {
-// 	tmf.cloneMutex.Lock()
-// 	defer tmf.cloneMutex.Unlock()
-
-// 	visitedObjects := make(map[string]bool)
-
-// 	// We will retrieve the objects in chunks of 100, looping until we get a reply with no objects
-// 	limit := 10
-// 	offset := 0
-
-// 	// We are only interested in ProductOfferings which are launched or active
-// 	// to the market (lifecycleStatus=Launched,Active)
-// 	lifecycleStatus := "Launched,Active"
-
-// 	var poList []*TMFObject
-
-// 	for {
-
-// 		// Get the list of catalogues from the DOME server
-// 		url := fmt.Sprintf("%s/catalog/catalog?limit=%d&offset=%d&lifecycleStatus=%s", tmf.domeServer, limit, offset, lifecycleStatus)
-// 		res, err := http.Get(url)
-// 		if err != nil {
-// 			slog.Error(err.Error())
-// 			return nil, nil, err
-// 		}
-// 		body, err := io.ReadAll(res.Body)
-// 		res.Body.Close()
-// 		if res.StatusCode > 299 {
-// 			slog.Error("Response failed", "status", res.StatusCode, "body", body)
-// 			return nil, nil, err
-// 		}
-// 		if err != nil {
-// 			slog.Error("reading response body", slogor.Err(err))
-// 			return nil, nil, err
-// 		}
-
-// 		// Parse the JSON response
-// 		var poListMap []map[string]any
-// 		err = json.Unmarshal(body, &poListMap)
-// 		if err != nil {
-// 			slog.Error("parsing JSOn response", slogor.Err(err))
-// 			return nil, nil, err
-// 		}
-
-// 		// Check if we should termninate the loop because there are no more objects
-// 		if len(poListMap) == 0 {
-// 			break
-// 		}
-
-// 		// Process the list
-// 		for _, oMap := range poListMap {
-
-// 			po, err := NewTMFObject(oMap, nil)
-// 			if err != nil {
-// 				slog.Error("creating NewTMFObject", slogor.Err(err))
-// 				continue
-// 			}
-
-// 			// There must be a relatedParty object
-// 			relatedPartyList, ok := po.ContentAsMap["relatedParty"].([]any)
-// 			if !ok {
-// 				slog.Error("invalid relatedParty object")
-// 				out, _ := json.MarshalIndent(oMap, "", "   ")
-// 				fmt.Println(string(out))
-// 				continue
-// 			}
-
-// 			if relatedPartyList == nil {
-// 				slog.Error("relatedParty is nil")
-// 				return nil, nil, fmt.Errorf("relatedParty is nil")
-// 			}
-
-// 			// One of the relatedParty items must be the one defining the owner
-// 			for _, rp := range relatedPartyList {
-// 				rpMap := rp.(map[string]any)
-// 				if strings.ToLower(rpMap["role"].(string)) == "owner" {
-// 					owner, _, err := tmf.RetrieveOrUpdateObject(nil, rpMap["href"].(string), "", "", LocalOrRemote)
-// 					if err != nil {
-// 						slog.Error(err.Error())
-// 						return nil, nil, err
-// 					}
-
-// 					// The array 'externalReference' contains the ID of the organization
-// 					ownerReference := owner.ContentAsMap["externalReference"].([]any)
-// 					if ownerReference == nil {
-// 						slog.Info("externalReference is nil")
-// 						return nil, nil, fmt.Errorf("externalReference is nil")
-// 					}
-
-// 					for _, extRef := range ownerReference {
-// 						extRefMap := extRef.(map[string]any)
-// 						if extRefMap["externalReferenceType"] == "idm_id" {
-// 							oid := extRefMap["name"].(string)
-// 							organization := owner.ID
-
-// 							// Now that we have the owner, update the local database for the productSpecification object
-// 							if len(owner.OrganizationIdentifier) == 0 {
-// 								owner, _ = owner.SetOwner(oid, organization)
-// 								err := tmf.LocalUpsertTMFObject(nil, owner)
-// 								if err != nil {
-// 									slog.Error(err.Error())
-// 									return nil, nil, err
-// 								}
-// 							}
-// 							if len(po.OrganizationIdentifier) == 0 {
-// 								po, _ = po.SetOwner(oid, organization)
-// 								err := tmf.LocalUpsertTMFObject(nil, po)
-// 								if err != nil {
-// 									slog.Error(err.Error())
-// 									return nil, nil, err
-// 								}
-// 							}
-
-// 							poList = append(poList, po)
-// 							break
-// 						}
-// 					}
-
-// 				}
-// 			}
-
-// 			visitedObjects[po.ID] = true
-
-// 		}
-
-// 		// Go and retrieve the next chunk of objects
-// 		offset = offset + limit
-
-// 	}
-
-// 	return poList, visitedObjects, nil
-
-// }
-
 // ************************************************************************
 // ************************************************************************
 // TMFCache database operations
@@ -1553,7 +1349,7 @@ func (tmf *TMFCache) DeleteTables() error {
 // LocalCheckIfExists reports if there is an object in the database with a given id and version.
 // It returns in addition its hash and freshness to enable comparisons with other objects.
 func (tmf *TMFCache) LocalCheckIfExists(
-	dbconn *sqlite.Conn, id string, version string,
+	dbconn *sqlite.Conn, id string, resource string, version string,
 ) (exists bool, hash []byte, freshness int, err error) {
 	if dbconn == nil {
 		var err error
@@ -1564,13 +1360,13 @@ func (tmf *TMFCache) LocalCheckIfExists(
 		defer tmf.dbpool.Put(dbconn)
 	}
 
-	return LocalCheckIfExists(dbconn, id, version)
+	return LocalCheckIfExists(dbconn, id, resource, version)
 
 }
 
 // LocalRetrieveTMFObject retrieves the object with the href (is the same as the id).
 // The version is optional. If it is not provided, the most recently version (by lexicographic order) is retrieved.
-func (tmf *TMFCache) LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, version string) (po TMFObject, found bool, err error) {
+func (tmf *TMFCache) LocalRetrieveTMFObject(dbconn *sqlite.Conn, id string, resource string, version string) (po TMFObject, found bool, err error) {
 	if dbconn == nil {
 		var err error
 		dbconn, err = tmf.dbpool.Take(context.Background())
@@ -1580,7 +1376,7 @@ func (tmf *TMFCache) LocalRetrieveTMFObject(dbconn *sqlite.Conn, href string, ve
 		defer tmf.dbpool.Put(dbconn)
 	}
 
-	return LocalRetrieveTMFObject(dbconn, href, version)
+	return LocalRetrieveTMFObject(dbconn, id, resource, version)
 
 }
 
@@ -1715,6 +1511,24 @@ func (tmf *TMFCache) FixTMFObject(dbconn *sqlite.Conn, tmfObject TMFObject, leve
 
 }
 
+// ProcessRelatedParties inspects and fixes the "relatedParty" entries of a TMFObject.
+// It performs several consistency checks and corrections, such as ensuring required fields
+// ("id", "href", "@referredType", "did", "role") are present and valid. If missing or invalid
+// data is found, it attempts to fix the entry and logs the correction. For related parties
+// referring to organizations, it may retrieve additional information from the database to
+// populate missing fields. The function also sets convenience fields in the TMFObject based
+// on the roles of related parties (e.g., "seller", "buyer", "selleroperator", "buyeroperator").
+// Returns true if any fixes were applied, or false if no changes were necessary. Returns an
+// error if the input object is nil or if other critical issues are encountered.
+//
+// Parameters:
+//   - dbconn: SQLite database connection used to retrieve referenced objects.
+//   - po:     The TMFObject to process and potentially fix.
+//   - level:  The FixLevel indicating whether and how to apply fixes.
+//
+// Returns:
+//   - fixed:  True if any relatedParty entries were fixed, false otherwise.
+//   - err:    Error if the operation failed or the input was invalid.
 func (tmf *TMFCache) ProcessRelatedParties(dbconn *sqlite.Conn, po TMFObject, level FixLevel) (fixed bool, err error) {
 
 	if level == FixNone {
@@ -1812,7 +1626,7 @@ func (tmf *TMFCache) ProcessRelatedParties(dbconn *sqlite.Conn, po TMFObject, le
 			// If the DID value is not good, deduce it from the Organization object pointed by the entry
 			if rpDid == "" || !strings.HasPrefix(rpDid, "did:elsi:") {
 
-				org, _, err := tmf.RetrieveOrUpdateObject(dbconn, rpHref, "", "", "", LocalOrRemote)
+				org, _, err := tmf.RetrieveOrUpdateObject(dbconn, rpHref, config.Organization, "", "", "", LocalOrRemote)
 
 				// org, err := localOrganizationByIdRetrieveOrUpdate(dbconn, rpHref)
 				if err != nil {

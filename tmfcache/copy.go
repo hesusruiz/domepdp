@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/hesusruiz/domeproxy/internal/errl"
+	"github.com/hesusruiz/domeproxy/internal/jpath"
 	"gitlab.com/greyxor/slogor"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
@@ -64,6 +65,7 @@ func (tmf *TMFCache) visitLocalMap(
 	if len(href) == 0 || visitedObjects[href] {
 		return visitedStack
 	}
+	resource, _ := currentObject["resource"].(string)
 
 	for k, v := range currentObject {
 		switch v := v.(type) {
@@ -106,7 +108,7 @@ func (tmf *TMFCache) visitLocalMap(
 	if tmf.Dump {
 		fmt.Printf("%sRetrieving %s\n", indentStr(indent), href)
 	}
-	localObject, _, err := tmf.LocalRetrieveTMFObject(dbconn, href, "")
+	localObject, _, err := tmf.LocalRetrieveTMFObject(dbconn, href, resource, "")
 	if err != nil {
 		slog.Error("retrieving local object", "href", href, slogor.Err(err))
 		return visitedStack
@@ -152,6 +154,7 @@ func (tmf *TMFCache) visitLocalArray(
 func (tmf *TMFCache) VisitRemoteObject(
 	dbconn *sqlite.Conn,
 	id string,
+	resource string,
 	visitedObjects map[string]bool,
 	visitedStack Stack,
 ) (object TMFObject, vs Stack, err error) {
@@ -167,7 +170,7 @@ func (tmf *TMFCache) VisitRemoteObject(
 
 	// With RetrieveOrUpdateObject, we go to the remote server only if the object is not in the local cache and
 	// is not fresh enough
-	tmfObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, id, "", "", "", LocalOrRemote)
+	tmfObject, _, err := tmf.RetrieveOrUpdateObject(dbconn, id, resource, "", "", "", LocalOrRemote)
 	if err != nil {
 		return nil, nil, errl.Error(err)
 	}
@@ -205,9 +208,10 @@ func (tmf *TMFCache) visitMapStack(
 		if tmf.Dump {
 			fmt.Printf("%shref: %v\n", indentStr(indent), href)
 		}
+		resource := jpath.GetString(currentObject, "resourceType")
 		if !visitedObjects[href] {
 			visitedObjects[href] = true
-			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, "", "", "", LocalOrRemote)
+			remoteObj, _, err := tmf.RetrieveOrUpdateObject(dbconn, href, resource, "", "", "", LocalOrRemote)
 			if err != nil {
 				slog.Error(err.Error())
 			} else {
