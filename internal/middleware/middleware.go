@@ -255,7 +255,7 @@ func ErrorTMF(w http.ResponseWriter, statusCode int, code string, reason string)
 }
 
 // ReplyTMF sends an HTTP response in the TMForum format
-func ReplyTMF(w http.ResponseWriter, data []byte, additionalHeaders map[string]string) {
+func ReplyTMF(w http.ResponseWriter, statusCode int, data []byte, additionalHeaders map[string]string) {
 
 	h := w.Header()
 

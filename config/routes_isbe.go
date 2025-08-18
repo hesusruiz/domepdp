@@ -5,8 +5,8 @@
 package config
 
 var GeneratedISBEManagementToUpstream = map[string]string{
-	"partyManagement":          "TODO: set upstream host and path like http://localhost:8062",
-	"productCatalogManagement": "http://localhost:8062",
+	"partyManagement":          "TODO: set upstream host and path like http://localhost:8620",
+	"productCatalogManagement": "http://localhost:8620",
 }
 
 var GeneratedISBEResourceToManagement = map[string]string{

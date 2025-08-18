@@ -81,7 +81,6 @@ def authorize():
     else:
         print("user is not authenticated")
 
-    return False
 
     # This rule denies access to remote users belonging to an
     # organization in the list of forbidden countries

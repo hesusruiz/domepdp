@@ -32,18 +32,20 @@ func getFakeClaims(isLear bool, organizationIdentifier, country string) map[stri
 		},
 	}
 
+	onboardingPower := map[string]any{
+		"type":     "Domain",
+		"domain":   "DOME",
+		"function": "Onboarding",
+		"action":   "execute",
+	}
+
 	if isLear {
 		// This is a bit verbose, but it ensures we are modifying the nested map correctly.
 		vc, _ := claims["vc"].(map[string]any)
 		credentialSubject, _ := vc["credentialSubject"].(map[string]any)
 		mandate, _ := credentialSubject["mandate"].(map[string]any)
-		mandate["power"] = []map[string]any{
-			{
-				"type":     "Domain",
-				"domain":   "DOME",
-				"function": "Onboarding",
-				"action":   "execute",
-			},
+		mandate["power"] = []any{
+			onboardingPower,
 		}
 	}
 

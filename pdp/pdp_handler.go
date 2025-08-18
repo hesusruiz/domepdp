@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+	conf "github.com/hesusruiz/domeproxy/config"
 	"github.com/hesusruiz/domeproxy/internal/errl"
 	"github.com/hesusruiz/domeproxy/internal/jpath"
 	"github.com/hesusruiz/domeproxy/tmfcache"
@@ -112,11 +114,6 @@ func AuthorizeLIST(
 			break
 		}
 
-		// No more objects, process what we have
-		if len(candidateObjects) == 0 {
-			break
-		}
-
 		// Process each object in the candidate list
 		for _, tmfObject := range candidateObjects {
 
@@ -152,6 +149,11 @@ func AuthorizeLIST(
 				finalObjects = append(finalObjects, tmfObject)
 			}
 
+		}
+
+		// We tretrieved less than limit, which means we have reached the end of the list
+		if len(candidateObjects) < limit {
+			break
 		}
 
 	}
@@ -444,6 +446,8 @@ func AuthorizeUPDATE(
 	return remotepo, nil
 }
 
+var ErrorAlreadyExists = errl.Errorf("object already exists")
+
 func AuthorizeCREATE(
 	logger *slog.Logger, tmf *tmfcache.TMFCache, ruleEngine *PDP, r *http.Request,
 	tmfAPI string, tmfResource string,
@@ -469,13 +473,15 @@ func AuthorizeCREATE(
 		return nil, errl.Error(err)
 	}
 
+	organizationIdentifier, _ := userArgument["organizationIdentifier"].(string)
+
 	// We do not allow a CREATE request to come without authorization info
 	if len(tokString) == 0 {
 		return nil, errl.Errorf("not authenticated")
 	}
 
 	// *******************************************************************************
-	// Retrieve the new object from the request body
+	// Retrieve the new object from the incoming request body
 	// *******************************************************************************
 
 	incomingRequestBody, err := io.ReadAll(r.Body)
@@ -502,6 +508,25 @@ func AuthorizeCREATE(
 	// TODO: add the seller and sellerOperator relatedParties
 	// incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
+	// If the incoming object has an 'id', check if it is already in the cache and reject creation.
+	if id, ok := incomingObjectArgument["id"].(string); ok && len(id) > 0 {
+		// Check if the object is already in the local database
+		_, found, _ := tmf.LocalRetrieveTMFObject(nil, id, tmfResource, "")
+		if found {
+			return nil, errl.Errorf("object already exists: %s", id)
+		}
+	} else {
+		// If the incoming object does not have an 'id', we generate a new one
+		// The format is "urn:ngsi-ld:{resource-in-kebab-case}:{uuid}"
+		newID := fmt.Sprintf("urn:ngsi-ld:%s:%s", conf.ToKebabCase(tmfResource), uuid.NewString())
+		incomingObjectArgument["id"] = newID
+	}
+
+	err = AddRequiredFields(incomingObjectArgument, organizationIdentifier, tmfResource)
+	if err != nil {
+		return nil, errl.Errorf("adding required fields: %w", err)
+	}
+
 	logger.Debug("AuthorizeCREATE: creating", "resource", tmfResource)
 
 	// *********************************************************************************
@@ -525,7 +550,6 @@ func AuthorizeCREATE(
 	}
 
 	// Send the POST to the central server.
-	// A POST in TMForum does not reply with any data.
 	tmfObject, err := doTMFPOST(logger, tmf.HttpClient, hostAndPath, tokString, incomingObjectArgument, tmfResource)
 	if err != nil {
 		return nil, errl.Errorf("creating object in upstream server: %w", err)
@@ -544,6 +568,83 @@ func AuthorizeCREATE(
 	return tmfObject, nil
 }
 
+func AddRequiredFields(incomingObjectArgument StarTMFMap, organizationIdentifier string, tmfResource string) (err error) {
+
+	// TODO: add @schemalocation and @type
+
+	// Look for the "Seller", "SellerOperator", "Buyer" and "BuyerOperator" roles
+	relatedParties, _ := incomingObjectArgument["relatedParty"].([]any)
+
+	seller := map[string]any{
+		"href":          "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+		"id":            "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+		"name":          organizationIdentifier,
+		"role":          "Seller",
+		"@referredType": "Organization",
+	}
+	sellerOperator := map[string]any{
+		"href":          "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+		"id":            "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+		"name":          "did:elsi:VATES-22222222",
+		"role":          "SellerOperator",
+		"@referredType": "Organization",
+	}
+
+	if len(relatedParties) == 0 {
+		incomingObjectArgument["relatedParty"] = []any{seller, sellerOperator}
+		return nil
+	}
+
+	foundSeller := false
+	foundSellerOperator := false
+
+	for _, rp := range relatedParties {
+
+		// Convert entry to a map
+		rpMap, _ := rp.(map[string]any)
+		if len(rpMap) == 0 {
+			return errl.Errorf("invalid relatedParty entry")
+		}
+
+		rpRole, _ := rpMap["role"].(string)
+		rpRole = strings.ToLower(rpRole)
+
+		if rpRole != "seller" && rpRole != "selleroperator" {
+			// Go to next entry
+			continue
+		}
+
+		if rpRole == "seller" {
+			foundSeller = true
+		}
+		if rpRole == "selleroperator" {
+			foundSellerOperator = true
+		}
+
+		rpId, _ := rpMap["id"].(string)
+		rpHref, _ := rpMap["href"].(string)
+
+		// It is a hard error if there is not an id or an href (in principle, must be both)
+		if len(rpId) == 0 && len(rpHref) == 0 {
+			return errl.Errorf("relatedParty entry without id or href: %v", rpMap)
+		}
+
+	}
+
+	if !foundSeller {
+		// Add the seller if it is not already in the list
+		relatedParties = append(relatedParties, seller)
+	}
+
+	if !foundSellerOperator {
+		// Add the seller operator if it is not already in the list
+		relatedParties = append(relatedParties, sellerOperator)
+	}
+
+	return nil
+
+}
+
 func doTMFPOST(
 	logger *slog.Logger,
 	httpClient *http.Client,
@@ -552,8 +653,6 @@ func doTMFPOST(
 	createObject StarTMFMap,
 	tmfResource string,
 ) (tmfcache.TMFObject, error) {
-
-	organizationIdentifier := createObject["organizationIdentifier"].(string)
 
 	outgoingRequestBody, err := json.Marshal(createObject)
 	if err != nil {
@@ -569,7 +668,6 @@ func doTMFPOST(
 	}
 
 	// Set the headers for the outgoing request, including the authorization token
-	req.Header.Set("X-Organization", organizationIdentifier)
 	req.Header.Set("Authorization", "Bearer "+auth_token)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("content-type", "application/json")

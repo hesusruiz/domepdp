@@ -1447,11 +1447,13 @@ func LocalRetrieveTMFObject(dbconn *sqlite.Conn, id string, resource string, ver
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectNoVersionSQL)
 		defer stmt.Reset()
 		stmt.SetText(":id", id)
+		stmt.SetText(":resource", resource)
 	} else {
 		const RetrieveTMFObjectSQL = `SELECT * FROM tmfobject WHERE id = :id AND resource = :resource AND version = :version;`
 		stmt, err = dbconn.Prepare(RetrieveTMFObjectSQL)
 		defer stmt.Reset()
 		stmt.SetText(":id", id)
+		stmt.SetText(":resource", resource)
 		stmt.SetText(":version", version)
 	}
 	if err != nil {
