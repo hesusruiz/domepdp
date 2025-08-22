@@ -1,0 +1,29 @@
+// Copyright 2023 Jesus Ruiz. All rights reserved.
+// Use of this source code is governed by an Apache 2.0
+// license that can be found in the LICENSE file.
+
+package config
+
+{{with .ManagementToUpstream}}
+var GeneratedISBEManagementToUpstream = map[string]string{
+{{range $resource, $path := . -}}
+    "{{$resource}}": "{{$path}}",
+{{end}}
+}
+{{end}}
+
+{{with .ResourceToManagement}}
+var GeneratedISBEResourceToManagement = map[string]string{
+{{range $resource, $path := . -}}
+    "{{$resource}}": "{{$path}}",
+{{end}}
+}
+{{end}}
+
+{{with .ResourceToStandardPath}}
+var GeneratedISBEResourceToPathPrefix = map[string]string{
+{{range $resource, $path := . -}}
+    "{{$resource}}": "{{$path}}",
+{{end}}
+}
+{{end}}

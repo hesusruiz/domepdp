@@ -19,6 +19,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	conf "github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/internal/errl"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 
 	"gitlab.com/greyxor/slogor"
 	starjson "go.starlark.net/lib/json"
@@ -67,15 +69,13 @@ func (d Decision) String() string {
 	}
 }
 
-// PDP implements a simple Policy Decision Point in Starlark, for use in the DOME project.
+// PDP implements a simple Policy Decision Point in Starlark, for use in front of TMForum APIs.
 //
 // There can be several instances simultaneously, and each instance is safe for concurrent
 // use by different goroutines.
 type PDP struct {
 
-	// environment is the run-time environment (production or development) where the PDP executes.
-	// Some things behave differently by default, like logging level.
-	// environment Environment
+	// The configuration of the PDP, which includes the file with the policies and other parameters.
 	config *conf.Config
 
 	// The name of the file where the policy rules reside.
@@ -129,7 +129,6 @@ func NewPDP(
 	m := &PDP{}
 	m.config = config
 	m.scriptname = config.PolicyFileName
-	// m.fileCache = sync.Map{}
 
 	// Create the file cache and initialize it with the policy file.
 	m.fileCache = conf.NewSimpleFileCache(nil)
@@ -164,7 +163,7 @@ func NewPDP(
 	m.httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return ErrorRedirectsNotAllowed
+			return tmfcache.ErrorRedirectsNotAllowed
 		},
 	}
 
@@ -173,7 +172,7 @@ func NewPDP(
 
 // defaultVerificationKey returns the verification key for Access Tokens, in JWK format.
 //
-// It receives the runtime environment, enabling a different mechanism depending on it.
+// It receives the config struct, enabling a different mechanism depending on it.
 func (m *PDP) defaultVerificationKey(config *conf.Config) (*jose.JSONWebKey, error) {
 
 	// Retrieve the OpenID configuration from the Verifier
@@ -1101,10 +1100,11 @@ func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found
 		return nil, false, nil
 	}
 
+	// For testing purposes, you can uncomment the following
 	verifierPublicKeyFunc := func(*jwt.Token) (any, error) {
 		vk, err := m.VerificationJWK()
 		if err != nil {
-			return nil, err
+			return nil, errl.Error(err)
 		}
 		slog.Debug("publicKeyFunc", "key", vk)
 		return vk.Key, nil
@@ -1113,7 +1113,7 @@ func (m *PDP) getClaimsFromToken(tokString string) (claims map[string]any, found
 	// Validate and verify the token
 	token, err = jwt.NewParser().ParseWithClaims(tokString, &theClaims, verifierPublicKeyFunc)
 	if err != nil {
-		return nil, false, fmt.Errorf("error parsing token: %w", err)
+		return nil, false, errl.Errorf("error parsing token: %w", err)
 	}
 
 	jwtmapClaims := token.Claims.(*MapClaims)

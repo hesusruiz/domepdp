@@ -12,6 +12,7 @@ import (
 	"github.com/hesusruiz/domeproxy/internal/middleware"
 	"github.com/hesusruiz/domeproxy/internal/sqlogger"
 	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"gitlab.com/greyxor/slogor"
 
 	"github.com/gofiber/template/html/v2"
@@ -23,7 +24,7 @@ var viewsfs embed.FS
 func addAdminRoutes(
 	config *config.Config,
 	mux *http.ServeMux,
-	tmf *pdp.TMFCache,
+	tmf *tmfcache.TMFCache,
 	rulesEngine *pdp.PDP,
 ) {
 

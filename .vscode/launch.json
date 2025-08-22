@@ -5,6 +5,33 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "dump",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "main.go",
+            "args": ["dump", "-b", "-e", "dev2", "productOffering"],
+            "cwd": "."
+        },
+        {
+            "name": "get",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "main.go",
+            "args": ["get", "-b", "-e", "dev2", "urn:ngsi-ld:organization:e0450017-87ad-460c-be36-f842a65b2dc4"],
+            "cwd": "."
+        },
+        {
+            "name": "fix",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "main.go",
+            "args": ["fix","-b", "-e", "dev2", "productOffering"],
+            "cwd": "."
+        },
+        {
             "name": "pruebas",
             "type": "go",
             "request": "launch",
@@ -16,8 +43,8 @@
             "type": "go",
             "request": "launch",
             "mode": "debug",
-            "program": "cmd/sync/main.go",
-            "args": ["-delete"],
+            "program": "main.go",
+            "args": ["sync","--delete", "-e", "sbx", "-r", "productOffering"],
             "cwd": "."
         },
         {
@@ -35,15 +62,8 @@
             "request": "launch",
             "mode": "debug",
             "program": "main.go",
-            "args": ["", "-debug"],
+            "args": ["-d", "--delete"],
             "cwd": "."
-        },
-        {
-            "name": "db.go",
-            "type": "go",
-            "request": "launch",
-            "mode": "debug",
-            "program": "cmd/db.go",
         },
 
 

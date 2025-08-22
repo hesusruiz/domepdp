@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domeproxy/internal/errl"
 	"github.com/hesusruiz/domeproxy/internal/middleware"
 	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"github.com/rs/cors"
 )
 
@@ -23,29 +25,30 @@ import (
 //  1. As a combination of PIP+PDP, intercepting all requests to downstream TMF APIs,
 //     evaluating the policies before the requests arrive to the actual implementation of the APIs.
 //  2. As a 'pure' PDP, acting as an authorization server for some upstream PIP like NGINX. In this
-//     mode, requests are intercepted by the PIP which asks the PDP for an authorization decision.
+//     mode, requests are intercepted by the PIP which asks the PDP (this program) for an authorization decision.
 func TMFServerHandler(
-	config *config.Config,
+	cfg *config.Config,
+	delete bool,
 ) (execute func() error, interrupt func(error), err error) {
 
-	// Set the defaul configuration, depending on the environment (production, development, ...)
-	tmfDb, err := pdp.NewTMFCache(config)
+	// Set the default configuration, depending on the environment (production, development, ...)
+	tmfDb, err := tmfcache.NewTMFCache(cfg, delete)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errl.Error(err)
 	}
 
 	mux := http.NewServeMux()
 
 	// Create an instance of the rules engine for the evaluation of the authorization policy rules
-	rulesEngine, err := pdp.NewPDP(config, nil, nil)
+	rulesEngine, err := pdp.NewPDP(cfg, nil, nil)
 	if err != nil {
-		panic(err)
+		return nil, nil, errl.Error(err)
 	}
 
-	addAdminRoutes(config, mux, tmfDb, rulesEngine)
+	addAdminRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Add the TMForum API routes
-	addHttpRoutes(config, mux, tmfDb, rulesEngine)
+	addHttpRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Enable CORS with permissive options.
 	handler := cors.AllowAll().Handler(mux)
@@ -58,7 +61,7 @@ func TMFServerHandler(
 
 	// An HTTP server with sensible defaults (no need to make them configurable)
 	s := &http.Server{
-		Addr:           config.PDPAddress,
+		Addr:           cfg.PDPAddress,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
@@ -69,34 +72,39 @@ func TMFServerHandler(
 	startServer := func() error {
 
 		// Start a cloning process immediately
-		slog.Info("Starting PDP and TMForum API server", "addr", config.PDPAddress)
+		slog.Info("Starting PDP and TMForum API server", "addr", cfg.PDPAddress)
 
-		// Start a backgroud process to clone the database
-		// We make an initial cloning and then repeat every ClonePeriod (10 minutes by default)
-		go func() {
+		if cfg.BackgroudSync {
+			slog.Info("Background synchronization is enabled, cloning remote resources periodically")
 
-			start := time.Now()
-			slog.Info("started cloning", "time", start.String())
+			// Start a backgroud process to clone the database
+			// We make an initial cloning and then repeat every ClonePeriod (10 minutes by default)
+			go func() {
 
-			tmfDb.CloneRemoteProductOfferings()
+				start := time.Now()
+				slog.Info("started cloning", "time", start.String())
 
-			elapsed := time.Since(start)
-			slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
+				_, _, err = tmfDb.CloneRemoteResourceTypes(config.RootISBEResources)
 
-			c := time.Tick(config.ClonePeriod)
-			for next := range c {
-				slog.Info("started cloning", "time", next.String())
-
-				tmfDb.CloneRemoteProductOfferings()
-
-				elapsed := time.Since(next)
+				elapsed := time.Since(start)
 				slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
-			}
 
-		}()
+				c := time.Tick(cfg.ClonePeriod)
+				for next := range c {
+					slog.Info("started cloning", "time", next.String())
+
+					_, _, err = tmfDb.CloneRemoteResourceTypes(config.RootISBEResources)
+
+					elapsed := time.Since(next)
+					slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
+				}
+
+			}()
+
+		}
 
 		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			return err
+			return errl.Error(err)
 		}
 		return nil
 

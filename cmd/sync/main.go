@@ -11,7 +11,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/pdp"
+	"github.com/hesusruiz/domeproxy/tmfcache"
 	"gitlab.com/greyxor/slogor"
 )
 
@@ -23,6 +23,7 @@ func main() {
 
 	var refreshTime = flag.Int("refresh", 3600, "refresh time in seconds, to update all objects older than this time")
 	var dump = flag.String("dump", "", "display an object by identifier")
+	var resource = flag.String("resource", "", "resource type, one of productOffering, catalog, or organization")
 	var delete = flag.Bool("delete", false, "delete the database before performing a new synchronization")
 	var envir = flag.String("env", "sbx", "environment, one of lcl, sbx, dev2 or pro.")
 
@@ -68,7 +69,7 @@ func main() {
 
 	tmfConfig := config.DefaultConfig(server, false, true)
 
-	tmf, err := pdp.NewTMFCache(tmfConfig)
+	tmf, err := tmfcache.NewTMFCache(tmfConfig, false)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -79,11 +80,11 @@ func main() {
 	}
 
 	if len(*dump) > 0 {
-		po, _, err := tmf.LocalRetrieveTMFObject(nil, *dump, "")
+		po, _, err := tmf.LocalRetrieveTMFObject(nil, *dump, *resource, "")
 		if err != nil {
 			panic(err)
 		}
-		out, err := json.MarshalIndent(po.ContentAsMap, "", "   ")
+		out, err := json.MarshalIndent(po.GetContentAsMap(), "", "   ")
 		if err != nil {
 			panic(err)
 		}

@@ -1,0 +1,78 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+type ErrorWithLocation struct {
+	location string
+	err      error
+}
+
+// Error returns the string including location and error
+func (e *ErrorWithLocation) Error() string {
+	return fmt.Sprintf("%s: %s", e.location, e.err.Error())
+}
+
+func (e *ErrorWithLocation) Unwrap() error {
+	return e.err
+}
+
+// Naked returns the error without location info, possibly to use in a logging system which already includes location info
+func (e *ErrorWithLocation) Naked() error {
+	return e.err
+}
+
+func Errorf(format string, a ...any) *ErrorWithLocation {
+	return buildError(fmt.Errorf(format, a...))
+}
+
+func Error(err error) *ErrorWithLocation {
+	return buildError(err)
+}
+
+func buildError(theError error) *ErrorWithLocation {
+	if theError == nil {
+		return nil
+	}
+	var pc uintptr
+	var pcs [1]uintptr
+	// skip [runtime.Callers, this function, this function caller]
+	runtime.Callers(3, pcs[:])
+	pc = pcs[0]
+
+	fs := runtime.CallersFrames([]uintptr{pc})
+	f, _ := fs.Next()
+
+	dir, file := filepath.Split(f.File)
+
+	// Trim the root directory prefix to get the relative directory of the source file
+	fullFileName := f.File
+	cwd, err := os.Getwd()
+	if err == nil {
+		relativeDir, err := filepath.Rel(cwd, filepath.Dir(dir))
+		if err == nil {
+			fullFileName = filepath.Join(relativeDir, file)
+		}
+	}
+
+	funcName := f.Function
+	idx := strings.LastIndex(funcName, ".")
+	if idx > 0 {
+		funcName = funcName[idx+1:]
+	}
+
+	location := fmt.Sprintf("%s:%d %s", fullFileName, f.Line, funcName)
+
+	e := &ErrorWithLocation{
+		location: location,
+		err:      theError,
+	}
+
+	return e
+
+}
