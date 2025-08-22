@@ -75,7 +75,7 @@ func AuthorizeLIST(
 
 	// LIST requests can be unauthenticated, but individual returned objects are
 	// subject to visibility policies.
-	_, tokenArgument, userArgument, err := extractCallerInfo(logger, ruleEngine, r)
+	_, tokenArgument, userArgument, err := extractCallerInfo(logger, tmf, ruleEngine, r)
 	if err != nil {
 		return nil, errl.Error(err)
 	}
@@ -87,75 +87,86 @@ func AuthorizeLIST(
 	r.ParseForm()
 
 	var finalObjects []tmfcache.TMFObject
-	var limit int
 
-	// Check if there is a limit requested by the user
+	// Default offset
+	offset := 0
+	offsetStr := r.Form.Get("offset")
+	if offsetStr != "" {
+		offset, _ = strconv.Atoi(offsetStr)
+	}
+
+	// Default limit
+	limit := 10
 	limitStr := r.Form.Get("limit")
 	if limitStr != "" {
 		limit, _ = strconv.Atoi(limitStr)
-	} else {
-		limit = 10
 	}
 
-	// Loop until we have retrieved enough objects or there are not any more
-	for {
+	// Objects received, to account for the offset
+	counter := 0
 
-		// limit <= 0 means no limit in this context
-		if limit > 0 && len(finalObjects) >= limit {
-			break
+	perObject := func(tmfObject tmfcache.TMFObject) tmfcache.LoopControl {
+
+		// Set the map representation
+		oMap := tmfObject.GetContentAsMap()
+		oMap["resource"] = tmfObject.GetType()
+		oMap["organizationIdentifier"] = tmfObject.GetOrganizationIdentifier()
+
+		tmfObjectArgument := StarTMFMap(oMap)
+
+		// Update the isOwner attribute of the user according to the object information
+		userArgument["isSeller"] = (userArgument["organizationIdentifier"] == tmfObject.GetSeller())
+		userArgument["isSellerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.GetSellerOperator())
+		userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.GetSeller()) ||
+			(userArgument["organizationIdentifier"] == tmfObject.GetSellerOperator())
+
+		userArgument["isBuyer"] = (userArgument["organizationIdentifier"] == tmfObject.GetBuyer())
+		userArgument["isBuyerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.GetBuyerOperator())
+
+		// *********************************************************************************
+		// Build the convenience data object from the usage terms embedded in the TMF object.
+		// *********************************************************************************
+
+		// Update the TMF object with the restrictions on countries and operator identifiers
+		tmfObjectArgument = getAllRestrictionElements(tmfObjectArgument)
+
+		// *********************************************************************************
+		// Pass the request, the object and the user to the rules engine for a decision.
+		// *********************************************************************************
+
+		userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, tmfObjectArgument, userArgument)
+
+		if !userCanAccessObject {
+			// This object is not a candidate, tell that we need another object
+			return tmfcache.LoopContinue
 		}
 
-		// Retrieve the TMF objects of the given type only locally
-		// We do not go to the upstream TMF API server, for performance reasons and to
-		// implement policy rules easier.
-		candidateObjects, _, err := tmf.LocalRetrieveListTMFObject(nil, tmfResource, r.Form)
-		if err != nil {
-			logger.Error("retrieving list of objects", "resource", tmfResource, slogor.Err(err))
-			break
+		// Check if we still did not reach the offset in the number of candidate objects
+		if counter < offset {
+			// We are still in the offset, do not add the object to the final list
+			counter++
+			return tmfcache.LoopContinue
 		}
 
-		// Process each object in the candidate list
-		for _, tmfObject := range candidateObjects {
+		counter++
+		finalObjects = append(finalObjects, tmfObject)
 
-			// Set the map representation
-			oMap := tmfObject.GetContentAsMap()
-			oMap["resource"] = tmfObject.GetResourceName()
-			oMap["organizationIdentifier"] = tmfObject.GetOrganizationIdentifier()
-
-			tmfObjectArgument := StarTMFMap(oMap)
-
-			// Update the isOwner attribute of the user according to the object information
-			userArgument["isSeller"] = (userArgument["organizationIdentifier"] == tmfObject.GetSeller())
-			userArgument["isSellerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.GetSellerOperator())
-			userArgument["isOwner"] = (userArgument["organizationIdentifier"] == tmfObject.GetSeller()) ||
-				(userArgument["organizationIdentifier"] == tmfObject.GetSellerOperator())
-
-			userArgument["isBuyer"] = (userArgument["organizationIdentifier"] == tmfObject.GetBuyer())
-			userArgument["isBuyerOperator"] = (userArgument["organizationIdentifier"] == tmfObject.GetBuyerOperator())
-
-			// *********************************************************************************
-			// Build the convenience data object from the usage terms embedded in the TMF object.
-			// *********************************************************************************
-
-			// Update the TMF object with the restrictions on countries and operator identifiers
-			tmfObjectArgument = getAllRestrictionElements(tmfObjectArgument)
-
-			// *********************************************************************************
-			// Pass the request, the object and the user to the rules engine for a decision.
-			// *********************************************************************************
-
-			userCanAccessObject := takeDecision(ruleEngine, requestArgument, tokenArgument, tmfObjectArgument, userArgument)
-			if userCanAccessObject {
-				finalObjects = append(finalObjects, tmfObject)
-			}
-
+		if len(finalObjects) >= limit {
+			// We reached the limit, stop the loop
+			return tmfcache.LoopStop
 		}
 
-		// We tretrieved less than limit, which means we have reached the end of the list
-		if len(candidateObjects) < limit {
-			break
-		}
+		// We still need more objects
+		return tmfcache.LoopContinue
 
+	}
+
+	// Retrieve the TMF objects of the given type only locally
+	// We do not go to the upstream TMF API server, for performance reasons and to
+	// implement policy rules easier.
+	err = tmf.LocalRetrieveListTMFObject(nil, tmfResource, r.Form, perObject)
+	if err != nil {
+		return nil, errl.Errorf("retrieving list of objects: %w", err)
 	}
 
 	// *********************************************************************************
@@ -170,7 +181,7 @@ AuthorizeREAD manages the read process of a single TMForum object (the GET metho
 */
 func AuthorizeREAD(
 	logger *slog.Logger,
-	tmfCache *tmfcache.TMFCache,
+	tmf *tmfcache.TMFCache,
 	ruleEngine *PDP,
 	r *http.Request,
 	tmfAPI string,
@@ -196,7 +207,7 @@ func AuthorizeREAD(
 	// ******************************************************************************
 
 	// READ requests can be unauthenticated
-	_, tokenArgument, userArgument, err := extractCallerInfo(logger, ruleEngine, r)
+	_, tokenArgument, userArgument, err := extractCallerInfo(logger, tmf, ruleEngine, r)
 	if err != nil {
 		return nil, errl.Error(err)
 	}
@@ -210,7 +221,7 @@ func AuthorizeREAD(
 
 	// var tmfObject tmfcache.TMFObject
 	// var local bool
-	ro, local, err := tmfCache.RetrieveOrUpdateObject(nil, id, tmfResource, "", "", "", tmfcache.LocalOrRemote)
+	ro, local, err := tmf.RetrieveOrUpdateObject(nil, id, tmfResource, "", "", "", tmfcache.LocalOrRemote)
 	if err != nil {
 		return nil, errl.Errorf("retrieving %s: %w", id, err)
 	}
@@ -223,9 +234,7 @@ func AuthorizeREAD(
 	tmfObject, _ := ro.(*tmfcache.TMFGeneralObject)
 
 	// Create a summary map object for the rules engine, to make rules simple to write
-	oMap := tmfObject.ContentAsMap
-	oMap["resource"] = tmfObject.ResourceName
-	oMap["organizationIdentifier"] = tmfObject.OrganizationIdentifier
+	oMap := tmfObject.GetContentAsMap()
 
 	tmfObjectArgument := StarTMFMap(oMap)
 
@@ -321,7 +330,7 @@ func AuthorizeUPDATE(
 ) (tmfcache.TMFObject, error) {
 
 	// ********************************************************************
-	// Parse the request and get the 'id' of the object to be updated.
+	// Parse the HTTP request.
 	// ********************************************************************
 
 	requestArgument, err := parseHTTPRequest(logger, r)
@@ -336,7 +345,7 @@ func AuthorizeUPDATE(
 	// Process the Access Token and retrieve info about the user sending the request.
 	// ******************************************************************************
 
-	tokString, tokenArgument, userArgument, err := extractCallerInfo(logger, ruleEngine, r)
+	tokString, tokenArgument, userArgument, err := extractCallerInfo(logger, tmf, ruleEngine, r)
 	if err != nil {
 		return nil, errl.Error(err)
 	}
@@ -352,10 +361,14 @@ func AuthorizeUPDATE(
 
 	// var existingTmfObject tmfcache.TMFObject
 
-	logger.Debug("AuthorizeUPDATE: retrieving", "type", tmfResource, "id", id)
+	// TODO: allow user to specify the version of the object to update
+	// For the moment, we update the latest version (empty string).
+	version := ""
+
+	logger.Debug("AuthorizeUPDATE: retrieving", "type", tmfResource, "id", id, "version", version)
 
 	// Check if the object is already in the local database
-	ro, found, err := tmf.LocalRetrieveTMFObject(nil, id, tmfResource, "")
+	ro, found, err := tmf.LocalRetrieveTMFObject(nil, id, tmfResource, version)
 	if err != nil {
 		return nil, errl.Errorf("retrieving from cache %s: %w", id, err)
 	}
@@ -373,9 +386,14 @@ func AuthorizeUPDATE(
 
 	userOrgId := userArgument["organizationIdentifier"].(string)
 
-	if userOrgId != existingTmfObject.Seller && userOrgId != existingTmfObject.SellerOperator &&
-		userOrgId != existingTmfObject.Buyer && userOrgId != existingTmfObject.BuyerOperator {
-		slog.Error("REJECTED: the user is not the owner", "user", userOrgId,
+	userOrgDID := userOrgId
+	if !strings.HasPrefix(userOrgId, "did:elsi:") {
+		userOrgDID = "did:elsi:" + userOrgId
+	}
+
+	if userOrgDID != existingTmfObject.Seller && userOrgDID != existingTmfObject.SellerOperator &&
+		userOrgDID != existingTmfObject.Buyer && userOrgDID != existingTmfObject.BuyerOperator {
+		slog.Error("REJECTED: the user is not the owner", "user", userOrgDID,
 			"seller", existingTmfObject.Seller, "sellerOperator", existingTmfObject.SellerOperator,
 			"buyer", existingTmfObject.Buyer, "buyerOperator", existingTmfObject.BuyerOperator)
 		return nil, errl.Errorf("not authorized")
@@ -385,20 +403,16 @@ func AuthorizeUPDATE(
 	// 5. Retrieve the object from the request body, which will be used to update the existing one
 	// ********************************************************************************************
 
-	incomingObjectArgument := StarTMFMap{}
-
-	requestBody, err := io.ReadAll(r.Body)
+	incomingRequestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, errl.Errorf("failed to read body: %w", err)
 	}
 
 	// Parse the request body into a StarTMFMap
-	if err := json.Unmarshal(requestBody, &incomingObjectArgument); err != nil {
+	incomingObjectArgument := StarTMFMap{}
+	if err := json.Unmarshal(incomingRequestBody, &incomingObjectArgument); err != nil {
 		return nil, errl.Errorf("failed to parse request: %w", err)
 	}
-
-	// Set the user as the owner in the object being written
-	incomingObjectArgument["organizationIdentifier"] = userOrgId
 
 	logger.Debug("AuthorizeUPDATE: updating", "type", tmfResource)
 
@@ -420,30 +434,23 @@ func AuthorizeUPDATE(
 		return nil, errl.Errorf("retrieving host and path for resource %s: %w", tmfResource, err)
 	}
 
-	// We pass the same authorization token as the one we received from the caller
-	remotepo, err := doPATCH(logger, hostAndPath, tokString, userOrgId, requestBody, tmfResource)
+	// Send the PATCH to the central server.
+	tmfObject, err := doPATCH(logger, id, hostAndPath, tokString, userOrgId, incomingRequestBody, tmfResource)
 	if err != nil {
-		logger.Error("AuthorizeUPDATE: performing PATCH", slogor.Err(err))
-		return nil, errl.Errorf("not authorized: %w", err)
+		return nil, errl.Errorf("updating object in upstream server: %w", err)
 	}
-
-	// The PATCH operation is on an existing object, so we assume that the local object has already
-	// the owner info.
-	// Set the owner id, just in case the remote object does not have it.
-	remotepo.SetOwner(existingTmfObject.Owner())
 
 	// **********************************************************************************
 	// 8. Update the cache with the response and return to the caller.
 	// **********************************************************************************
 
 	// Update the object in the local database
-	err = tmf.LocalUpsertTMFObject(nil, remotepo)
+	err = tmf.LocalUpsertTMFObject(nil, tmfObject)
 	if err != nil {
-		logger.Error("AuthorizeUPDATE: update local cache", slogor.Err(err))
-		return nil, errl.Errorf("not authorized: %w", err)
+		return nil, errl.Errorf("inserting object in local database: %w", err)
 	}
 
-	return remotepo, nil
+	return tmfObject, nil
 }
 
 var ErrorAlreadyExists = errl.Errorf("object already exists")
@@ -468,12 +475,10 @@ func AuthorizeCREATE(
 	// Process the Access Token and retrieve info about the user sending the request.
 	// ******************************************************************************
 
-	tokString, tokenArgument, userArgument, err := extractCallerInfo(logger, ruleEngine, r)
+	tokString, tokenArgument, userArgument, err := extractCallerInfo(logger, tmf, ruleEngine, r)
 	if err != nil {
 		return nil, errl.Error(err)
 	}
-
-	organizationIdentifier, _ := userArgument["organizationIdentifier"].(string)
 
 	// We do not allow a CREATE request to come without authorization info
 	if len(tokString) == 0 {
@@ -489,24 +494,11 @@ func AuthorizeCREATE(
 		return nil, errl.Errorf("failed to read body: %w", err)
 	}
 
-	incomingObjectArgument := StarTMFMap{}
-
 	// Parse the request body into a StarTMFMap
+	incomingObjectArgument := StarTMFMap{}
 	if err := json.Unmarshal(incomingRequestBody, &incomingObjectArgument); err != nil {
 		return nil, errl.Errorf("failed to parse request: %w", err)
 	}
-
-	// Perform some minimal checking. The real validation will be performed by TMForum implementation
-	if len(incomingObjectArgument["name"].(string)) == 0 ||
-		len(incomingObjectArgument["version"].(string)) == 0 ||
-		len(incomingObjectArgument["lifecycleStatus"].(string)) == 0 {
-		return nil, errl.Errorf("either name, version or lifecycleStatus is missing in the request body")
-	}
-
-	// Set the user as the owner in the object being written
-
-	// TODO: add the seller and sellerOperator relatedParties
-	// incomingObjectArgument["organizationIdentifier"] = userOrganizationIdentifier
 
 	// If the incoming object has an 'id', check if it is already in the cache and reject creation.
 	if id, ok := incomingObjectArgument["id"].(string); ok && len(id) > 0 {
@@ -522,7 +514,17 @@ func AuthorizeCREATE(
 		incomingObjectArgument["id"] = newID
 	}
 
-	err = AddRequiredFields(incomingObjectArgument, organizationIdentifier, tmfResource)
+	// Perform some minimal checking.
+	if len(incomingObjectArgument["name"].(string)) == 0 ||
+		len(incomingObjectArgument["version"].(string)) == 0 ||
+		len(incomingObjectArgument["lifecycleStatus"].(string)) == 0 {
+		return nil, errl.Errorf("either name, version or lifecycleStatus is missing in the request body")
+	}
+
+	// Set Seller and Buyer information, using the organization identifier from the user making the call
+	userOrganizationIdentifier, _ := userArgument["organizationIdentifier"].(string)
+
+	err = setSellerAndBuyerInfo(incomingObjectArgument, userOrganizationIdentifier)
 	if err != nil {
 		return nil, errl.Errorf("adding required fields: %w", err)
 	}
@@ -568,30 +570,48 @@ func AuthorizeCREATE(
 	return tmfObject, nil
 }
 
-func AddRequiredFields(incomingObjectArgument StarTMFMap, organizationIdentifier string, tmfResource string) (err error) {
+// setSellerAndBuyerInfo adds the required fields to the incoming object argument
+// Specifically, the Seller and SellerOperator roles are added to the relatedParty list
+func setSellerAndBuyerInfo(tmfObjectMap map[string]any, organizationIdentifier string) (err error) {
+
+	// Normalize all organization identifiers to the DID format
+	if !strings.HasPrefix(organizationIdentifier, "did:elsi:") {
+		organizationIdentifier = "did:elsi:" + organizationIdentifier
+	}
 
 	// TODO: add @schemalocation and @type
+	// TODO: look in the database for an Organization with the user's organizationIdentifier
 
 	// Look for the "Seller", "SellerOperator", "Buyer" and "BuyerOperator" roles
-	relatedParties, _ := incomingObjectArgument["relatedParty"].([]any)
+	relatedParties := jpath.GetList(tmfObjectMap, "relatedParty")
 
-	seller := map[string]any{
-		"href":          "urn:ngsi-ld:organization:221f6434-ec82-4c62",
-		"id":            "urn:ngsi-ld:organization:221f6434-ec82-4c62",
-		"name":          organizationIdentifier,
-		"role":          "Seller",
-		"@referredType": "Organization",
+	// Build the two entries
+	sellerEntry := map[string]any{
+		"role":  "Seller",
+		"@type": "RelatedPartyRefOrPartyRoleRef",
+		"partyOrPartyRole": map[string]any{
+			"@type":         "PartyRef",
+			"href":          "urn:ngsi-ld:organization:" + organizationIdentifier,
+			"id":            "urn:ngsi-ld:organization:" + organizationIdentifier,
+			"name":          organizationIdentifier,
+			"@referredType": "Organization",
+		},
 	}
 	sellerOperator := map[string]any{
-		"href":          "urn:ngsi-ld:organization:221f6434-ec82-4c62",
-		"id":            "urn:ngsi-ld:organization:221f6434-ec82-4c62",
-		"name":          "did:elsi:VATES-22222222",
-		"role":          "SellerOperator",
-		"@referredType": "Organization",
+		"role":  "SellerOperator",
+		"@type": "RelatedPartyRefOrPartyRoleRef",
+		"partyOrPartyRole": map[string]any{
+			"@type":         "PartyRef",
+			"href":          "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+			"id":            "urn:ngsi-ld:organization:221f6434-ec82-4c62",
+			"name":          "did:elsi:VATES-22222222",
+			"@referredType": "Organization",
+		},
 	}
 
 	if len(relatedParties) == 0 {
-		incomingObjectArgument["relatedParty"] = []any{seller, sellerOperator}
+		slog.Debug("setSellerAndBuyerInfo: no relatedParty, adding seller and sellerOperator")
+		tmfObjectMap["relatedParty"] = []any{sellerEntry, sellerOperator}
 		return nil
 	}
 
@@ -621,25 +641,21 @@ func AddRequiredFields(incomingObjectArgument StarTMFMap, organizationIdentifier
 			foundSellerOperator = true
 		}
 
-		rpId, _ := rpMap["id"].(string)
-		rpHref, _ := rpMap["href"].(string)
-
-		// It is a hard error if there is not an id or an href (in principle, must be both)
-		if len(rpId) == 0 && len(rpHref) == 0 {
-			return errl.Errorf("relatedParty entry without id or href: %v", rpMap)
-		}
-
 	}
 
 	if !foundSeller {
 		// Add the seller if it is not already in the list
-		relatedParties = append(relatedParties, seller)
+		slog.Debug("setSellerAndBuyerInfo: adding seller", "organizationIdentifier", organizationIdentifier)
+		relatedParties = append(relatedParties, sellerEntry)
 	}
 
 	if !foundSellerOperator {
 		// Add the seller operator if it is not already in the list
+		slog.Debug("setSellerAndBuyerInfo: adding seller operator", "organizationIdentifier", organizationIdentifier)
 		relatedParties = append(relatedParties, sellerOperator)
 	}
+
+	tmfObjectMap["relatedParty"] = relatedParties
 
 	return nil
 
@@ -787,7 +803,9 @@ func tokenFromHeader(r *http.Request) string {
 	return ""
 }
 
-func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIdentifier string, request_body []byte, tmfResource string) (tmfcache.TMFObject, error) {
+func doPATCH(logger *slog.Logger, id string, url string, auth_token string, organizationIdentifier string, request_body []byte, tmfResource string) (tmfcache.TMFObject, error) {
+
+	url = url + "/" + id
 
 	buf := bytes.NewReader(request_body)
 
@@ -823,19 +841,6 @@ func doPATCH(logger *slog.Logger, url string, auth_token string, organizationIde
 		logger.Error(err.Error())
 		return nil, err
 	}
-
-	// var oMap = map[string]any{}
-	// err = json.Unmarshal(reply_body, &oMap)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// // Create a TMFObject struct from the map
-	// po, err := tmfcache.NewTMFObject(oMap, nil)
-	// if err != nil {
-	// 	logger.Error(err.Error())
-	// 	return nil, err
-	// }
 
 	return po, nil
 }
@@ -928,6 +933,7 @@ func parseHTTPRequest(logger *slog.Logger, r *http.Request) (StarTMFMap, error) 
 // For convenience of the policies, some calculated fields are created and returned in the 'user' object.
 func extractCallerInfo(
 	logger *slog.Logger,
+	tmf *tmfcache.TMFCache,
 	ruleEngine *PDP,
 	r *http.Request,
 ) (tokString string, tokenArgument StarTMFMap, user StarTMFMap, err error) {
@@ -937,9 +943,29 @@ func extractCallerInfo(
 
 		slog.Debug("PDP: using fake claims for testing")
 
-		tokString = "fake-tokenstring"
-		fakeClaims := getFakeClaims(true, "did:elsi:VATES-00000000", "ES")
-		tokenArgument = StarTMFMap(fakeClaims)
+		// tokString = "fake-tokenstring"
+		// fakeClaims := getFakeClaims(true, "did:elsi:VATES-00000000", "ES")
+		// tokenArgument = StarTMFMap(fakeClaims)
+
+		tokString = fakeAT
+		if len(tokString) == 0 {
+			// An empty token is not considered an error, and the caller should enforce its existence
+			return tokString, StarTMFMap{}, StarTMFMap{}, nil
+		}
+
+		// It is an error to send an invaild token with the request, so we have to verify it.
+
+		// Verify the token and extract the claims.
+		// A verification error stops processing.
+		var tokClaims map[string]any
+
+		tokClaims, _, err = ruleEngine.getClaimsFromToken(tokString)
+		if err != nil {
+			logger.Error("invalid access token", slogor.Err(err), "token", tokString)
+			return "", nil, nil, errl.Errorf("invalid access token: %w", err)
+		}
+
+		tokenArgument = StarTMFMap(tokClaims)
 
 	} else {
 
@@ -984,41 +1010,39 @@ func extractCallerInfo(
 
 		powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
 		for _, p := range powers {
-			if jpath.GetString(p, "type") == "Domain" &&
-				jpath.GetString(p, "domain") == "DOME" &&
-				jpath.GetString(p, "function") == "Onboarding" &&
-				jpath.GetString(p, "action") == "execute" {
+			ptype := jpath.GetString(p, "type")
+			pdomain := jpath.GetString(p, "domain")
+			pfunction := jpath.GetString(p, "function")
+			paction := jpath.GetString(p, "action")
+
+			// Check fields without regards to case
+			if strings.EqualFold(ptype, "Domain") &&
+				strings.EqualFold(pdomain, "DOME") &&
+				strings.EqualFold(pfunction, "Onboarding") &&
+				strings.EqualFold(paction, "execute") {
 
 				userArgument["isLEAR"] = true
-
 			}
+
+			ptype = jpath.GetString(p, "tmf_type")
+			pdomain = jpath.GetString(p, "tmf_domain")
+			pfunction = jpath.GetString(p, "tmf_function")
+			paction = jpath.GetString(p, "tmf_action")
+
+			if strings.EqualFold(ptype, "Domain") &&
+				strings.EqualFold(pdomain, "DOME") &&
+				strings.EqualFold(pfunction, "Onboarding") &&
+				strings.EqualFold(paction, "execute") {
+
+				userArgument["isLEAR"] = true
+			}
+
 		}
 
 	} else {
-		// This is to support old-format Verifiable Credentials
-		verifiableCredential = jpath.GetMap(tokenArgument, "verifiableCredential")
 
-		if len(verifiableCredential) > 0 {
-			userArgument["isAuthenticated"] = true
-
-			powers := jpath.GetList(verifiableCredential, "credentialSubject.mandate.power")
-			for _, p := range powers {
-				if jpath.GetString(p, "type") == "Domain" &&
-					jpath.GetString(p, "domain") == "DOME" &&
-					jpath.GetString(p, "function") == "Onboarding" &&
-					jpath.GetString(p, "action") == "execute" {
-
-					userArgument["isLEAR"] = true
-
-				}
-			}
-
-		} else {
-			// There is not a Verifiable Credential inside the token
-			err := errl.Errorf("ccess token without verifiable credential: %s", tokString)
-			logger.Error(err.Naked().Error())
-			return "", nil, nil, err
-		}
+		// There is not a Verifiable Credential inside the token
+		return "", nil, nil, errl.Errorf("access token without verifiable credential: %s", tokString)
 
 	}
 
@@ -1027,9 +1051,9 @@ func extractCallerInfo(
 	if len(userOrganizationIdentifier) == 0 {
 		return "", nil, nil, errl.Errorf("access token without organizationIdentifier: %s", tokString)
 	}
-	if !strings.HasPrefix(userOrganizationIdentifier, "did:elsi") {
-		return "", nil, nil, errl.Errorf("invalid organizationIdentifier: %s in token: %s", userOrganizationIdentifier, tokString)
-	}
+	// if !strings.HasPrefix(userOrganizationIdentifier, "did:elsi") {
+	// 	return "", nil, nil, errl.Errorf("invalid organizationIdentifier: %s in token: %s", userOrganizationIdentifier, tokString)
+	// }
 	userArgument["organizationIdentifier"] = userOrganizationIdentifier
 
 	country := jpath.GetString(verifiableCredential, "credentialSubject.mandate.mandator.country")
@@ -1037,6 +1061,34 @@ func extractCallerInfo(
 		return "", nil, nil, errl.Errorf("access token without country: %s", tokString)
 	}
 	userArgument["country"] = country
+
+	// *******************************************************************************************
+	// Check if the organization of the user already exists in our database, and create it if not
+	// *******************************************************************************************
+
+	_, found, err := tmf.LocalRetrieveOrgByDid(nil, userOrganizationIdentifier)
+	if err != nil {
+		return "", nil, nil, errl.Error(err)
+	}
+
+	if !found {
+
+		// Create the organization in memory
+		newOrg, err := tmfcache.TMFOrganizationFromToken(tokenArgument)
+		if err != nil {
+			return "", nil, nil, errl.Error(err)
+		}
+
+		// **********************************************************************************
+		// Create the object in the upstream TMForum API server.
+		// **********************************************************************************
+
+		_, err = tmf.CreateObject(logger, tokString, newOrg)
+		if err != nil {
+			return "", nil, nil, errl.Errorf("creating organization in upstream server: %w", err)
+		}
+
+	}
 
 	return tokString, tokenArgument, userArgument, nil
 

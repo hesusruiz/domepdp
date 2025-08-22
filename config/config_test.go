@@ -75,7 +75,7 @@ func TestFromIdToResourceName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := FromIdToResourceName(tt.args.id)
+			got, err := FromIdToResourceType(tt.args.id)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("FromIdToResourceName() error = %v, wantErr %v", err, tt.wantErr)
 				return

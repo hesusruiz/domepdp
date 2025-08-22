@@ -271,6 +271,7 @@ func ReplyTMF(w http.ResponseWriter, statusCode int, data []byte, additionalHead
 		h.Set(k, v)
 	}
 
+	w.WriteHeader(statusCode)
 	w.Write(data)
 
 }

@@ -20,8 +20,9 @@ func main() {
 
 	_, err := tmfcache.TMFObjectFromMap(
 		map[string]any{
-			"ID": "urn:ngsi-ld:ProductOffering",
+			"id": "urn:ngsi-ld:ProductOffering",
 		},
+		"productOffering",
 	)
 	if err != nil {
 		fmt.Println(err.Error())

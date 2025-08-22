@@ -48,18 +48,19 @@ func startServices(args []string) {
 	// PDP and general command line flags
 	pdpAddress := rootFlags.String('p', "pdp", ":9991", "address of the PDP server implementing the TMForum APIs")
 	debug := rootFlags.Bool('d', "debug", "run in debug mode with more logs enabled")
-	nocolor := rootFlags.Bool('n', "nocolor", "disable color output for the logs to stdout")
 	internal := rootFlags.Bool('i', "internal", "true if must use internal upstream hosts")
 	usingBAEProxy := rootFlags.BoolDefault('b', "bae", false, "use the BAE Proxy for external access to TMForum")
-	domeenvir := rootFlags.StringEnum('e', "env", "runtime environment [lcl, sbx, dev2 or pro]", "isbe", "sbx", "lcl", "dev2", "pro")
-	backgroundSync := rootFlags.BoolDefault('s', "backgroudsync", false, "enable background synchronization of the TMForum resources")
+	runtimeenv := rootFlags.StringEnum('r', "run", "runtime environment [isbe,lcl, sbx, dev2 or pro]", "isbe", "sbx", "lcl", "dev2", "pro")
+	backgroundSync := rootFlags.BoolDefault('s', "backgroundsync", false, "enable background synchronization of the TMForum resources")
+	nocolor := rootFlags.Bool('n', "nocolor", "disable color output for the logs to stdout")
+	var delete = rootFlags.BoolLong("delete", "delete the database before performing a new synchronization")
 
 	// Man-In-The-Middle proxy flags
-	enableMITM := rootFlags.BoolLong("mitmenable", "enable the Man-In-The-Middle proxy server")
-	mitmAddress := rootFlags.StringLong("mitmaddress", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
-	caCertFile := rootFlags.StringLong("mitmcacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
-	caKeyFile := rootFlags.StringLong("mitmcakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
-	proxyPassword := rootFlags.StringLong("mitmpassword", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
+	enableMITM := rootFlags.BoolLong("mitm_enable", "enable the Man-In-The-Middle proxy server")
+	mitmAddress := rootFlags.StringLong("mitm_address", ":8888", "address of the Man-In-The-Middle proxy server intercepting requests to/from the Marketplace")
+	caCertFile := rootFlags.StringLong("mitm_cacertfile", "secrets/rootCA.pem", "certificate .pem file for trusted CA for the MITM proxy")
+	caKeyFile := rootFlags.StringLong("mitm_cakeyfile", "secrets/rootCA-key.pem", "key .pem file for trusted CA for the MITM proxy")
+	proxyPassword := rootFlags.StringLong("mitm_password", "secrets/proxy-password.txt", "the password file for proxy authentication of the MITM proxy")
 
 	rootCmd := &ff.Command{
 		Name:  "domepdp",
@@ -67,7 +68,6 @@ func startServices(args []string) {
 		Flags: rootFlags,
 		Exec: func(ctx context.Context, args []string) error {
 
-			fmt.Println("running MAIN domepdp command")
 			if len(args) > 0 {
 				return errl.Errorf("invalid subcommand: '%s'", args[0])
 			}
@@ -79,7 +79,7 @@ func startServices(args []string) {
 			// all actors are interrupted by calling to their stop function for a graceful shutdown.
 			var concurrentGroup run.Group
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			tmfConfig, err := config.LoadConfig(*runtimeenv, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				return errl.Error(err)
 			}
@@ -90,7 +90,7 @@ func startServices(args []string) {
 			tmfConfig.FakeClaims = true
 
 			// Configure the PDP server to receive/authorize intercepted requests
-			tmfRun, tmfStop, err := tmfproxy.TMFServerHandler(tmfConfig)
+			tmfRun, tmfStop, err := tmfproxy.TMFServerHandler(tmfConfig, *delete)
 			if err != nil {
 				return errl.Errorf("error starting TMF server: %w", err)
 			}
@@ -117,7 +117,7 @@ func startServices(args []string) {
 			if *enableMITM {
 
 				mitmConfig := mitm.NewConfig(
-					*domeenvir,
+					*runtimeenv,
 					*mitmAddress,
 					*caCertFile,
 					*caKeyFile,
@@ -151,7 +151,6 @@ func startServices(args []string) {
 	syncFlags := ff.NewFlagSet("sync").SetParent(rootFlags)
 
 	var fressness = syncFlags.Int('f', "freshness", 3600, "refresh time in seconds, to update all objects older than this time")
-	var delete = syncFlags.BoolLong("delete", "delete the database before performing a new synchronization")
 	var resources = syncFlags.StringList('r', "resource", "TMForum resource type to synchronize. Can be repeated to specify more than one")
 
 	syncCmd := &ff.Command{
@@ -181,7 +180,7 @@ func startServices(args []string) {
 				slog.Info("synchronizing ALL resources")
 			}
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			tmfConfig, err := config.LoadConfig(*runtimeenv, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -205,7 +204,7 @@ func startServices(args []string) {
 			visitedObjects := make(map[string]bool)
 			if len(*resources) > 0 {
 
-				_, visitedObjects, err = tmf.CloneRemoteResources(*resources)
+				_, visitedObjects, err = tmf.CloneRemoteResourceTypes(*resources)
 
 			} else {
 				_, visitedObjects, err = tmf.CloneAllRemoteBAEResources()
@@ -262,7 +261,7 @@ func startServices(args []string) {
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			tmfConfig, err := config.LoadConfig(*runtimeenv, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("error loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -335,7 +334,7 @@ func startServices(args []string) {
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			tmfConfig, err := config.LoadConfig(*runtimeenv, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("error loading configuration", slogor.Err(err))
 				os.Exit(1)
@@ -365,7 +364,7 @@ func startServices(args []string) {
 
 				visitedObjects := make(map[string]bool)
 
-				oList, err := cache.CloneRemoteResource(resource, visitedObjects)
+				oList, err := cache.CloneRemoteResourceType(resource, visitedObjects)
 				if err != nil {
 					fmt.Println("error:", err.Error())
 					continue
@@ -376,13 +375,10 @@ func startServices(args []string) {
 				fmt.Println("############################################")
 				for _, pepe := range oList {
 
-					org, err := tmfcache.TMFObjectFromMap(pepe.GetContentAsMap())
+					org, err := tmfcache.TMFObjectFromMap(pepe.GetContentAsMap(), resource)
 					if err != nil {
 						panic(err)
 					}
-
-					// id, _ := org.GetIDMID()
-					// org.SetOrganizationIdentification(id)
 
 					fmt.Println(org)
 				}
@@ -419,7 +415,7 @@ func startServices(args []string) {
 			logger := config.SetLogger(*debug, *nocolor)
 			defer logger.Close()
 
-			tmfConfig, err := config.LoadConfig(*domeenvir, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
+			tmfConfig, err := config.LoadConfig(*runtimeenv, *pdpAddress, *internal, *usingBAEProxy, *debug, logger)
 			if err != nil {
 				slog.Error("error loading configuration", slogor.Err(err))
 				os.Exit(1)

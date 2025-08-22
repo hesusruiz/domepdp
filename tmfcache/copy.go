@@ -31,7 +31,13 @@ func (tmf *TMFCache) LocalProductOfferings(dbconn *sqlite.Conn, tmfResource stri
 		// This function is called once for each record found in the database
 		ResultFunc: func(stmt *sqlite.Stmt) error {
 
-			dbObject, err := objectFromDbRecord(stmt)
+			// The map representation of the object is always
+			// built from the JSON representation in the content field.
+			// The system ensures that this field is in synch with the in-memory fields of the struct.
+			var content = make([]byte, stmt.GetLen("content"))
+			stmt.GetBytes("content", content)
+
+			dbObject, err := TMFObjectFromBytes(content, tmfResource)
 			if err != nil {
 				return errl.Error(err)
 			}

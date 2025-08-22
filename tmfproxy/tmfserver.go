@@ -28,10 +28,11 @@ import (
 //     mode, requests are intercepted by the PIP which asks the PDP (this program) for an authorization decision.
 func TMFServerHandler(
 	cfg *config.Config,
+	delete bool,
 ) (execute func() error, interrupt func(error), err error) {
 
 	// Set the default configuration, depending on the environment (production, development, ...)
-	tmfDb, err := tmfcache.NewTMFCache(cfg, false)
+	tmfDb, err := tmfcache.NewTMFCache(cfg, delete)
 	if err != nil {
 		return nil, nil, errl.Error(err)
 	}
@@ -47,7 +48,7 @@ func TMFServerHandler(
 	addAdminRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Add the TMForum API routes
-	addHttpRoutesISBE(cfg, mux, tmfDb, rulesEngine)
+	addHttpRoutes(cfg, mux, tmfDb, rulesEngine)
 
 	// Enable CORS with permissive options.
 	handler := cors.AllowAll().Handler(mux)
@@ -83,9 +84,7 @@ func TMFServerHandler(
 				start := time.Now()
 				slog.Info("started cloning", "time", start.String())
 
-				tmfDb.CloneRemoteProductOfferings()
-
-				_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
+				_, _, err = tmfDb.CloneRemoteResourceTypes(config.RootISBEResources)
 
 				elapsed := time.Since(start)
 				slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())
@@ -94,8 +93,7 @@ func TMFServerHandler(
 				for next := range c {
 					slog.Info("started cloning", "time", next.String())
 
-					tmfDb.CloneRemoteProductOfferings()
-					_, _, err = tmfDb.CloneRemoteResources([]string{"category", "productCatalog"})
+					_, _, err = tmfDb.CloneRemoteResourceTypes(config.RootISBEResources)
 
 					elapsed := time.Since(next)
 					slog.Info("finished cloning", "elapsed (ms)", elapsed.Milliseconds())

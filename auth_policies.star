@@ -100,7 +100,7 @@ def authorize():
         return True
 
     # This denies access to all requests that have not been rejected or
-    #accepted by the previous rules.
+    # accepted by the previous rules.
     # The default is to deny access, so if you do not explicitly return True
     # at some point, the request will be rejected.
     return True

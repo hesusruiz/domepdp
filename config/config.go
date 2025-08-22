@@ -161,7 +161,7 @@ var isbeConfig = &Config{
 	BAEProxyDomain:    "tmf.mycredential.eu",
 	ExternalTMFDomain: "tmf.mycredential.eu",
 	TMFURLPrefix:      "http://localhost:8620",
-	VerifierServer:    "https://verifier.dome-marketplace-lcl.org",
+	VerifierServer:    "https://verifier.dome-marketplace.eu",
 	Dbname:            ISBE_dbname,
 	ClonePeriod:       DefaultClonePeriod,
 }
@@ -474,12 +474,12 @@ var defaultBAEResourceToPathPrefix = map[string]string{
 	"resourceSpecification": "/resource/resourceSpecification/",
 }
 
-// FromIdToResourceName converts an ID in the format "urn:ngsi-ld:product-offering-price:32611feb-6f78-4ccd-a4a2-547cb01cf33d"
+// FromIdToResourceType converts an ID in the format "urn:ngsi-ld:product-offering-price:32611feb-6f78-4ccd-a4a2-547cb01cf33d"
 // to a resource name like "productOfferingPrice".
 // It extracts the resource type from the ID and converts it to camelCase.
 // This is the ID format used in DOME for the TMForum APIs.
 // It returns an error if the ID format is invalid.
-func FromIdToResourceName(id string) (string, error) {
+func FromIdToResourceType(id string) (string, error) {
 	// id must be like "urn:ngsi-ld:product-offering-price:32611feb-6f78-4ccd-a4a2-547cb01cf33d"
 	// We will convert from product-offering-price to productOfferingPrice
 
@@ -714,6 +714,14 @@ var RootBAEObjects = []string{
 	"resourceSpecification",
 	"productOrder",
 	"product",
+}
+
+var RootISBEResources = []string{
+	"productOffering",
+	"productSpecification",
+	"productOfferingPrice",
+	"category",
+	"productCatalog",
 }
 
 const SchemaLocationRelatedParty = "https://raw.githubusercontent.com/DOME-Marketplace/dome-odrl-profile/refs/heads/main/schemas/simplified/RelatedPartyRef.schema.json"
