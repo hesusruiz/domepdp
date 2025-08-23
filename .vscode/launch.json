@@ -5,6 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "fiber",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "cmd/tmfserver/v5/main.go",
+            "args": [],
+            "cwd": "."
+        },
+        {
             "name": "dump",
             "type": "go",
             "request": "launch",
