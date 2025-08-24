@@ -17,16 +17,16 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/run"
-	"github.com/hesusruiz/domeproxy/mitm"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/run"
+	"github.com/hesusruiz/domepdp/mitm"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 	"gitlab.com/greyxor/slogor"
 
-	"github.com/hesusruiz/domeproxy/tmfproxy"
+	"github.com/hesusruiz/domepdp/tmfproxy"
 )
 
 func main() {

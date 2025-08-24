@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/config"
+	"github.com/hesusruiz/domepdp/config"
 	"gitlab.com/greyxor/slogor"
 )
 

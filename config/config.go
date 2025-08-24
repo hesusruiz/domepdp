@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/sqlogger"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/sqlogger"
 )
 
 type Config struct {

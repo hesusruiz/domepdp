@@ -9,8 +9,8 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/jpath"
 	"golang.org/x/tools/imports"
 )
 
@@ -76,7 +76,7 @@ func main() {
 	}
 
 	// opts := format.Options{
-	// 	ModulePath: "github.com/hesusruiz/domeproxy",
+	// 	ModulePath: "github.com/hesusruiz/domepdp",
 	// }
 	// out, err = format.Source(out, opts)
 	// if err != nil {

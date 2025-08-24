@@ -8,9 +8,9 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/google/uuid"
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/jpath"
 	"zombiezen.com/go/sqlite"
 )
 

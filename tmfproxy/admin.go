@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/middleware"
-	"github.com/hesusruiz/domeproxy/internal/sqlogger"
-	"github.com/hesusruiz/domeproxy/pdp"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/middleware"
+	"github.com/hesusruiz/domepdp/internal/sqlogger"
+	"github.com/hesusruiz/domepdp/pdp"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"gitlab.com/greyxor/slogor"
 
 	"github.com/gofiber/template/html/v2"

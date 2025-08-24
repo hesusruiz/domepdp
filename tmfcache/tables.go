@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
 	sqlb "github.com/huandu/go-sqlbuilder"
 	"gitlab.com/greyxor/slogor"
 	"zombiezen.com/go/sqlite"

@@ -18,10 +18,10 @@ import (
 
 	"slices"
 
-	"github.com/hesusruiz/domeproxy/config"
-	mdl "github.com/hesusruiz/domeproxy/internal/middleware"
-	"github.com/hesusruiz/domeproxy/pdp"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/config"
+	mdl "github.com/hesusruiz/domepdp/internal/middleware"
+	"github.com/hesusruiz/domepdp/pdp"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	slogformatter "github.com/samber/slog-formatter"
 	"gitlab.com/greyxor/slogor"
 )

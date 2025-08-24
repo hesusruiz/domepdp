@@ -36,7 +36,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/tmfproxy"
+	"github.com/hesusruiz/domepdp/tmfproxy"
 	"github.com/smarty/cproxy/v2"
 	"gitlab.com/greyxor/slogor"
 )

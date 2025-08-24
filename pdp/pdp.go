@@ -18,9 +18,9 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
-	conf "github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	conf "github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/tmfcache"
 
 	"gitlab.com/greyxor/slogor"
 	starjson "go.starlark.net/lib/json"

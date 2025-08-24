@@ -6,9 +6,7 @@ This project is a RESTful API server built with Go. Follow these guidelines for 
 
 - **OpenAPI definitions:** The OpenAPI definition files are in the `oapiv5/` directory. There is one YAML file per each family of REST APIs. The server implements in a sinble binary all the APIs combined. 
 
-- **Framework:** For the HTTP server we use the `labstack/echo` framework for routing. All handlers must be defined in the `internal/handler` package.
-
-- **Database:** We use SQLite (with the `mattn/go-sqlite3` driver) with the `sqlx` library. All database query logic should be encapsulated within the `internal/repository` package. Avoid direct database calls from handlers.
+- **Database:** We use SQLite (with the `mattn/go-sqlite3` driver) with the `sqlx` library. Avoid direct database calls from handlers.
 
 - **Database Table design:** For storage of the TMForum objects, we will use just one table, with one JSON field to store the whole object, and other fields for metadata and particular fields of the JSON object which may be interesting to simplify the SQL queries. The inspiration for the table design can be the existing code in `tmfcache\tables.go`.
 
@@ -22,5 +20,5 @@ This project is a RESTful API server built with Go. Follow these guidelines for 
 
 - **File Structure:** Adhere to the following directory structure:
   - `cmd/tmfpdp/`: Main entry points for the application.
-  - `internal/`: Private application code (handlers, repositories, services).
+  - `tmfserver/`: Application code (handlers, repositories, services).
   - `pkg/`: Reusable, public packages (e.g., API error types, shared utilities).

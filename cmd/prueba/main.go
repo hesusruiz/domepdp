@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"gitlab.com/greyxor/slogor"
 )
 

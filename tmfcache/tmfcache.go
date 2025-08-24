@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/jpath"
 	"gitlab.com/greyxor/slogor"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"

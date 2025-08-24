@@ -24,8 +24,8 @@
 // The package leverages several external libraries, including:
 //
 //   - github.com/goccy/go-json: For JSON serialization and deserialization.
-//   - github.com/hesusruiz/domeproxy/config: For configuration settings.
-//   - github.com/hesusruiz/domeproxy/internal/errl: For error handling.
+//   - github.com/hesusruiz/domepdp/config: For configuration settings.
+//   - github.com/hesusruiz/domepdp/tmfserver/errl: For error handling.
 //   - github.com/huandu/go-sqlbuilder: For building SQL queries.
 //   - zombiezen.com/go/sqlite: For interacting with the SQLite database.
 //
@@ -41,9 +41,9 @@ import (
 	"strings"
 
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/jpath"
 	"gitlab.com/greyxor/slogor"
 	"zombiezen.com/go/sqlite"
 )

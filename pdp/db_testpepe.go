@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/tmfcache"
 )
 
 func Test_buildWhereFromParms(t *testing.T) {

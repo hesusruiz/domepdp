@@ -10,7 +10,7 @@ import (
 	"text/template"
 
 	"github.com/goccy/go-yaml"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
+	"github.com/hesusruiz/domepdp/internal/jpath"
 	"golang.org/x/tools/imports"
 )
 

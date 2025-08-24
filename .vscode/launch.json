@@ -9,7 +9,7 @@
             "type": "go",
             "request": "launch",
             "mode": "debug",
-            "program": "cmd/tmfserver/v5/main.go",
+            "program": "cmd/isbeserver/main.go",
             "args": [],
             "cwd": "."
         },

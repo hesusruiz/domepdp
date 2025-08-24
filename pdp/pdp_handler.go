@@ -17,10 +17,10 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	conf "github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/jpath"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	conf "github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/jpath"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"gitlab.com/greyxor/slogor"
 	st "go.starlark.net/starlark"
 )
@@ -846,9 +846,10 @@ func doPATCH(logger *slog.Logger, id string, url string, auth_token string, orga
 }
 
 var httpMethodAliases = map[string]string{
-	"GET":   "READ",
-	"POST":  "CREATE",
-	"PATCH": "UPDATE",
+	"GET":    "READ",
+	"POST":   "CREATE",
+	"PATCH":  "UPDATE",
+	"DELETE": "DELETE",
 }
 
 // parseHTTPRequest converts the HTTP request into a StarTMFMap, processing the X-Original headers.

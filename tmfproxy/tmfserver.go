@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/internal/errl"
-	"github.com/hesusruiz/domeproxy/internal/middleware"
-	"github.com/hesusruiz/domeproxy/pdp"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/internal/errl"
+	"github.com/hesusruiz/domepdp/internal/middleware"
+	"github.com/hesusruiz/domepdp/pdp"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"github.com/rs/cors"
 )
 

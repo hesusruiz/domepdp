@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/hesusruiz/domeproxy/config"
-	"github.com/hesusruiz/domeproxy/tmfcache"
+	"github.com/hesusruiz/domepdp/config"
+	"github.com/hesusruiz/domepdp/tmfcache"
 	"gitlab.com/greyxor/slogor"
 )
 
